@@ -90,6 +90,8 @@ jobs:
           "devkit_version=$devkitVersion" >> $env:GITHUB_OUTPUT
           "release_tag=upstream-$short" >> $env:GITHUB_OUTPUT
           "asset_name=zig-windows-x86_64-$short.zip" >> $env:GITHUB_OUTPUT
+          "latest_release_tag=latest-master" >> $env:GITHUB_OUTPUT
+          "latest_asset_name=zig-windows-x86_64-latest-master.zip" >> $env:GITHUB_OUTPUT
 
       - name: Verify host tools
         shell: pwsh
@@ -156,6 +158,7 @@ jobs:
         run: |
           $short = '${{ steps.meta.outputs.short_sha }}'
           $asset = '${{ steps.meta.outputs.asset_name }}'
+          $latestAsset = '${{ steps.meta.outputs.latest_asset_name }}'
           $distRoot = Join-Path $PWD "dist\zig-windows-x86_64-$short"
 
           New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
@@ -165,7 +168,11 @@ jobs:
           Copy-Item '.\LICENSE' -Destination (Join-Path $distRoot 'LICENSE')
           Copy-Item '.\README.md' -Destination (Join-Path $distRoot 'README.md')
 
-          Compress-Archive -Path $distRoot -DestinationPath (Join-Path $PWD $asset) -Force
+          $assetPath = Join-Path $PWD $asset
+          $latestAssetPath = Join-Path $PWD $latestAsset
+
+          Compress-Archive -Path $distRoot -DestinationPath $assetPath -Force
+          Copy-Item $assetPath -Destination $latestAssetPath -Force
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
@@ -188,3 +195,20 @@ jobs:
             Commit subject: `${{ steps.meta.outputs.subject }}`
 
             This portable Windows zip contains `zig.exe` and the matching `lib/` directory from the synced source tree.
+
+      - name: Publish rolling latest-master release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.latest_release_tag }}
+          target_commitish: ${{ steps.meta.outputs.sha }}
+          name: Zig latest master
+          prerelease: true
+          files: ${{ github.workspace }}\${{ steps.meta.outputs.latest_asset_name }}
+          overwrite_files: true
+          body: |
+            Rolling latest-master prerelease for the newest successful Codeberg `master` sync.
+
+            Upstream commit: `${{ steps.meta.outputs.sha }}`
+            Commit subject: `${{ steps.meta.outputs.subject }}`
+
+            This tag is intentionally updated in place. Use the per-commit `upstream-<shortsha>` releases for immutable archives.
