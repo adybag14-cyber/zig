@@ -1,0 +1,190 @@
+name: Sync Codeberg Master And Release Windows Build
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */8 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: zig-codeberg-sync-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+      upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
+      short_sha: ${{ steps.sync.outputs.short_sha }}
+    steps:
+      - name: Checkout automation branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync master from Codeberg
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git remote add upstream https://codeberg.org/ziglang/zig.git
+          git fetch --prune upstream master
+
+          before="$(git ls-remote origin refs/heads/master | awk '{print $1}')"
+          after="$(git rev-parse refs/remotes/upstream/master)"
+          short="${after::12}"
+
+          echo "upstream_sha=$after" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short" >> "$GITHUB_OUTPUT"
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" || "$before" != "$after" ]]; then
+            git push --force origin "refs/remotes/upstream/master:refs/heads/master"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build_windows:
+    name: Build Portable Windows Zip
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    runs-on: windows-2022
+    steps:
+      - name: Checkout synced master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 1
+
+      - name: Capture build metadata
+        id: meta
+        shell: pwsh
+        run: |
+          $sha = git rev-parse HEAD
+          $expected = '${{ needs.sync.outputs.upstream_sha }}'
+          if ($expected -and $sha -ne $expected) {
+            throw "Expected upstream SHA $expected but checked out $sha"
+          }
+
+          $subject = git log -1 --format=%s
+          $ci = Get-Content 'ci/x86_64-windows-release.ps1' -Raw
+          if ($ci -notmatch 'zig\+llvm\+lld\+clang-\$TARGET-([^"]+)') {
+            throw 'Could not parse the Windows dev kit version from ci/x86_64-windows-release.ps1'
+          }
+
+          $short = $sha.Substring(0, 12)
+          $devkitVersion = $Matches[1]
+
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          "short_sha=$short" >> $env:GITHUB_OUTPUT
+          "subject=$subject" >> $env:GITHUB_OUTPUT
+          "devkit_version=$devkitVersion" >> $env:GITHUB_OUTPUT
+          "release_tag=upstream-$short" >> $env:GITHUB_OUTPUT
+          "asset_name=zig-windows-x86_64-$short.zip" >> $env:GITHUB_OUTPUT
+
+      - name: Verify host tools
+        shell: pwsh
+        run: |
+          cmake --version
+          ninja --version
+
+      - name: Download matching Zig dev kit
+        id: devkit
+        shell: pwsh
+        run: |
+          $version = '${{ steps.meta.outputs.devkit_version }}'
+          $depsRoot = Join-Path $env:RUNNER_TEMP 'zig-deps'
+          $zip = Join-Path $depsRoot "zig+llvm+lld+clang-x86_64-windows-gnu-$version.zip"
+          $prefix = Join-Path $depsRoot "zig+llvm+lld+clang-x86_64-windows-gnu-$version"
+          $url = "https://ziglang.org/deps/zig+llvm+lld+clang-x86_64-windows-gnu-$version.zip"
+
+          New-Item -ItemType Directory -Force -Path $depsRoot | Out-Null
+
+          if (!(Test-Path $prefix)) {
+            curl.exe -L --fail --output $zip $url
+            Expand-Archive -Path $zip -DestinationPath $depsRoot
+          }
+
+          "prefix_path=$prefix" >> $env:GITHUB_OUTPUT
+
+      - name: Configure and build release binary
+        shell: pwsh
+        run: |
+          $target = 'x86_64-windows-gnu'
+          $mcpu = 'baseline'
+          $prefixPath = '${{ steps.devkit.outputs.prefix_path }}'
+          $zig = Join-Path $prefixPath 'bin\zig.exe'
+
+          $env:ZIG_GLOBAL_CACHE_DIR = Join-Path $PWD 'zig-global-cache'
+          $env:ZIG_LOCAL_CACHE_DIR = Join-Path $PWD 'zig-local-cache'
+
+          New-Item -ItemType Directory -Force -Path 'build-release' | Out-Null
+          Set-Location 'build-release'
+
+          cmake .. `
+            -GNinja `
+            -DCMAKE_INSTALL_PREFIX='stage3-release' `
+            -DCMAKE_PREFIX_PATH="$($prefixPath -Replace '\\', '/')" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER="$($zig -Replace '\\', '/');cc;-target;$target;-mcpu=$mcpu" `
+            -DCMAKE_CXX_COMPILER="$($zig -Replace '\\', '/');c++;-target;$target;-mcpu=$mcpu" `
+            -DCMAKE_AR="$($zig -Replace '\\', '/')" `
+            -DZIG_AR_WORKAROUND=ON `
+            -DZIG_TARGET_TRIPLE="$target" `
+            -DZIG_TARGET_MCPU="$mcpu" `
+            -DZIG_STATIC=ON `
+            -DZIG_NO_LIB=ON
+
+          ninja install
+
+      - name: Smoke test built zig
+        shell: pwsh
+        run: |
+          & '.\build-release\stage3-release\bin\zig.exe' version
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          $short = '${{ steps.meta.outputs.short_sha }}'
+          $asset = '${{ steps.meta.outputs.asset_name }}'
+          $distRoot = Join-Path $PWD "dist\zig-windows-x86_64-$short"
+
+          New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
+
+          Copy-Item '.\build-release\stage3-release\bin\zig.exe' -Destination (Join-Path $distRoot 'zig.exe')
+          Copy-Item '.\lib' -Destination (Join-Path $distRoot 'lib') -Recurse
+          Copy-Item '.\LICENSE' -Destination (Join-Path $distRoot 'LICENSE')
+          Copy-Item '.\README.md' -Destination (Join-Path $distRoot 'README.md')
+
+          Compress-Archive -Path $distRoot -DestinationPath (Join-Path $PWD $asset) -Force
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zig-windows-x86_64-${{ steps.meta.outputs.short_sha }}
+          path: ${{ github.workspace }}\${{ steps.meta.outputs.asset_name }}
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.release_tag }}
+          target_commitish: ${{ steps.meta.outputs.sha }}
+          name: Zig upstream master ${{ steps.meta.outputs.short_sha }}
+          prerelease: true
+          files: ${{ github.workspace }}\${{ steps.meta.outputs.asset_name }}
+          body: |
+            Automated sync from Codeberg `master`.
+
+            Upstream commit: `${{ steps.meta.outputs.sha }}`
+            Commit subject: `${{ steps.meta.outputs.subject }}`
+
+            This portable Windows zip contains `zig.exe` and the matching `lib/` directory from the synced source tree.
