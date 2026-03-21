@@ -159,7 +159,7 @@ jobs:
       - metadata
     if: needs.sync.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.release_scope == 'all' || github.event.inputs.release_scope == 'linux')
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 480
     steps:
       - name: Checkout automation branch
         uses: actions/checkout@v4
@@ -239,7 +239,7 @@ jobs:
       - metadata
     if: needs.sync.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.release_scope == 'all' || github.event.inputs.release_scope == 'windows')
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 480
     steps:
       - name: Checkout automation branch
         uses: actions/checkout@v4
@@ -319,7 +319,7 @@ jobs:
       - metadata
     if: needs.sync.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.release_scope == 'all' || github.event.inputs.release_scope == 'macos')
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 480
     steps:
       - name: Checkout automation branch
         uses: actions/checkout@v4
