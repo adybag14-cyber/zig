@@ -1,4 +1,4 @@
-name: Sync Codeberg Master And Release Portable Builds
+name: Sync Codeberg Master And Mirror Release Assets
 
 on:
   workflow_dispatch:
@@ -53,301 +53,9 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-  build_unix:
-    name: Build ${{ matrix.asset_prefix }}
+  mirror_release_assets:
+    name: Mirror Zig Master Release Assets
     needs: sync
-    if: needs.sync.outputs.changed == 'true'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            ci_script: ci/x86_64-linux-release.sh
-            asset_prefix: zig-linux-x86_64
-            depfile_workaround: true
-          - runner: ubuntu-24.04-arm
-            ci_script: ci/aarch64-linux-release.sh
-            asset_prefix: zig-linux-aarch64
-            depfile_workaround: false
-          - runner: macos-15
-            ci_script: ci/aarch64-macos-release.sh
-            asset_prefix: zig-macos-aarch64
-            depfile_workaround: false
-    steps:
-      - name: Checkout synced master
-        uses: actions/checkout@v4
-        with:
-          ref: master
-          fetch-depth: 1
-
-      - name: Capture build metadata
-        id: meta
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          script='${{ matrix.ci_script }}'
-          target="$(sed -n 's/^TARGET="\([^"]*\)"/\1/p' "$script")"
-          mcpu="$(sed -n 's/^MCPU="\([^"]*\)"/\1/p' "$script")"
-          cache_template="$(sed -n 's/^CACHE_BASENAME="\([^"]*\)"/\1/p' "$script")"
-          short='${{ needs.sync.outputs.short_sha }}'
-
-          if [[ -z "$target" || -z "$mcpu" || -z "$cache_template" ]]; then
-            echo "Failed to parse build metadata from $script" >&2
-            exit 1
-          fi
-
-          cache_basename="${cache_template/\$TARGET/$target}"
-
-          echo "target=$target" >> "$GITHUB_OUTPUT"
-          echo "mcpu=$mcpu" >> "$GITHUB_OUTPUT"
-          echo "cache_basename=$cache_basename" >> "$GITHUB_OUTPUT"
-          echo "asset_name=${{ matrix.asset_prefix }}-$short.tar.xz" >> "$GITHUB_OUTPUT"
-
-      - name: Verify host tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake --version
-          ninja --version
-
-      - name: Download matching Zig dev kit
-        id: devkit
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          deps_root="$RUNNER_TEMP/zig-deps"
-          cache_basename='${{ steps.meta.outputs.cache_basename }}'
-          archive="$deps_root/$cache_basename.tar.xz"
-          prefix="$deps_root/$cache_basename"
-
-          mkdir -p "$deps_root"
-
-          if [[ ! -d "$prefix" ]]; then
-            curl -L --fail --output "$archive" "https://ziglang.org/deps/$cache_basename.tar.xz"
-            tar -C "$deps_root" -xf "$archive"
-          fi
-
-          echo "prefix_path=$prefix" >> "$GITHUB_OUTPUT"
-
-      - name: Configure and build release binary
-        shell: bash
-        env:
-          ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/zig-global-cache
-          ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/zig-local-cache
-        run: |
-          set -euo pipefail
-
-          target='${{ steps.meta.outputs.target }}'
-          mcpu='${{ steps.meta.outputs.mcpu }}'
-          prefix='${{ steps.devkit.outputs.prefix_path }}'
-          zig="$prefix/bin/zig"
-          extra_flags=()
-
-          if [[ '${{ matrix.depfile_workaround }}' == 'true' ]]; then
-            extra_flags+=(
-              -DCMAKE_C_LINKER_DEPFILE_SUPPORTED=FALSE
-              -DCMAKE_CXX_LINKER_DEPFILE_SUPPORTED=FALSE
-            )
-          fi
-
-          mkdir build-release
-          cd build-release
-
-          cmake .. \
-            -GNinja \
-            -DCMAKE_INSTALL_PREFIX=stage3-release \
-            -DCMAKE_PREFIX_PATH="$prefix" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER="$zig;cc;-target;$target;-mcpu=$mcpu" \
-            -DCMAKE_CXX_COMPILER="$zig;c++;-target;$target;-mcpu=$mcpu" \
-            -DZIG_TARGET_TRIPLE="$target" \
-            -DZIG_TARGET_MCPU="$mcpu" \
-            -DZIG_STATIC=ON \
-            -DZIG_NO_LIB=ON \
-            "${extra_flags[@]}"
-
-          ninja install
-
-      - name: Smoke test built zig
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./build-release/stage3-release/bin/zig version
-
-      - name: Package portable archive
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          short='${{ needs.sync.outputs.short_sha }}'
-          asset_name='${{ steps.meta.outputs.asset_name }}'
-          dist_root="dist/${{ matrix.asset_prefix }}-$short"
-
-          mkdir -p "$dist_root"
-          install -m 0755 build-release/stage3-release/bin/zig "$dist_root/zig"
-          cp -R lib "$dist_root/lib"
-          cp LICENSE "$dist_root/LICENSE"
-          cp README.md "$dist_root/README.md"
-
-          export COPYFILE_DISABLE=1
-          (
-            cd dist
-            tar -cJf "$asset_name" "${{ matrix.asset_prefix }}-$short"
-          )
-
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.meta.outputs.asset_name }}
-          path: dist/${{ steps.meta.outputs.asset_name }}
-          if-no-files-found: error
-
-  build_windows:
-    name: Build ${{ matrix.asset_prefix }}
-    needs: sync
-    if: needs.sync.outputs.changed == 'true'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: windows-2022
-            ci_script: ci/x86_64-windows-release.ps1
-            asset_prefix: zig-windows-x86_64
-          - runner: windows-11-arm
-            ci_script: ci/aarch64-windows.ps1
-            asset_prefix: zig-windows-aarch64
-    steps:
-      - name: Checkout synced master
-        uses: actions/checkout@v4
-        with:
-          ref: master
-          fetch-depth: 1
-
-      - name: Capture build metadata
-        id: meta
-        shell: pwsh
-        run: |
-          $scriptPath = '${{ matrix.ci_script }}'
-          $script = Get-Content $scriptPath -Raw
-          $short = '${{ needs.sync.outputs.short_sha }}'
-
-          if ($script -notmatch '\$TARGET = "([^"]+)"') {
-            throw "Could not parse the target from $scriptPath"
-          }
-          $target = $Matches[1]
-
-          if ($script -match '\$MCPU = "([^"]+)"') {
-            $mcpu = $Matches[1]
-          } else {
-            $mcpu = 'baseline'
-          }
-
-          if ($script -notmatch 'zig\+llvm\+lld\+clang-\$TARGET-([^"]+)') {
-            throw "Could not parse the dev kit version from $scriptPath"
-          }
-          $cacheBasename = "zig+llvm+lld+clang-$target-$($Matches[1])"
-
-          "target=$target" >> $env:GITHUB_OUTPUT
-          "mcpu=$mcpu" >> $env:GITHUB_OUTPUT
-          "cache_basename=$cacheBasename" >> $env:GITHUB_OUTPUT
-          "asset_name=${{ matrix.asset_prefix }}-$short.zip" >> $env:GITHUB_OUTPUT
-
-      - name: Verify host tools
-        shell: pwsh
-        run: |
-          cmake --version
-          ninja --version
-
-      - name: Download matching Zig dev kit
-        id: devkit
-        shell: pwsh
-        run: |
-          $cacheBasename = '${{ steps.meta.outputs.cache_basename }}'
-          $depsRoot = Join-Path $env:RUNNER_TEMP 'zig-deps'
-          $zip = Join-Path $depsRoot "$cacheBasename.zip"
-          $prefix = Join-Path $depsRoot $cacheBasename
-          $url = "https://ziglang.org/deps/$cacheBasename.zip"
-
-          New-Item -ItemType Directory -Force -Path $depsRoot | Out-Null
-
-          if (!(Test-Path $prefix)) {
-            curl.exe -L --fail --output $zip $url
-            Expand-Archive -Path $zip -DestinationPath $depsRoot
-          }
-
-          "prefix_path=$prefix" >> $env:GITHUB_OUTPUT
-
-      - name: Configure and build release binary
-        shell: pwsh
-        env:
-          ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\zig-global-cache
-          ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}\zig-local-cache
-        run: |
-          $target = '${{ steps.meta.outputs.target }}'
-          $mcpu = '${{ steps.meta.outputs.mcpu }}'
-          $prefixPath = '${{ steps.devkit.outputs.prefix_path }}'
-          $zig = Join-Path $prefixPath 'bin\zig.exe'
-
-          New-Item -ItemType Directory -Force -Path 'build-release' | Out-Null
-          Set-Location 'build-release'
-
-          cmake .. `
-            -GNinja `
-            -DCMAKE_INSTALL_PREFIX='stage3-release' `
-            -DCMAKE_PREFIX_PATH="$($prefixPath -Replace '\\', '/')" `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_COMPILER="$($zig -Replace '\\', '/');cc;-target;$target;-mcpu=$mcpu" `
-            -DCMAKE_CXX_COMPILER="$($zig -Replace '\\', '/');c++;-target;$target;-mcpu=$mcpu" `
-            -DCMAKE_AR="$($zig -Replace '\\', '/')" `
-            -DZIG_AR_WORKAROUND=ON `
-            -DZIG_TARGET_TRIPLE="$target" `
-            -DZIG_TARGET_MCPU="$mcpu" `
-            -DZIG_STATIC=ON `
-            -DZIG_NO_LIB=ON
-
-          ninja install
-
-      - name: Smoke test built zig
-        shell: pwsh
-        run: |
-          & '.\build-release\stage3-release\bin\zig.exe' version
-
-      - name: Package portable zip
-        shell: pwsh
-        run: |
-          $short = '${{ needs.sync.outputs.short_sha }}'
-          $assetName = '${{ steps.meta.outputs.asset_name }}'
-          $distRoot = Join-Path $PWD "dist\${{ matrix.asset_prefix }}-$short"
-          $assetPath = Join-Path $PWD "dist\$assetName"
-
-          New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
-
-          Copy-Item '.\build-release\stage3-release\bin\zig.exe' -Destination (Join-Path $distRoot 'zig.exe')
-          Copy-Item '.\lib' -Destination (Join-Path $distRoot 'lib') -Recurse
-          Copy-Item '.\LICENSE' -Destination (Join-Path $distRoot 'LICENSE')
-          Copy-Item '.\README.md' -Destination (Join-Path $distRoot 'README.md')
-
-          Compress-Archive -Path $distRoot -DestinationPath $assetPath -Force
-
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.meta.outputs.asset_name }}
-          path: dist/${{ steps.meta.outputs.asset_name }}
-          if-no-files-found: error
-
-  publish:
-    name: Publish GitHub Releases
-    needs:
-      - sync
-      - build_unix
-      - build_windows
     if: needs.sync.outputs.changed == 'true'
     runs-on: ubuntu-24.04
     steps:
@@ -357,8 +65,8 @@ jobs:
           ref: master
           fetch-depth: 1
 
-      - name: Capture release metadata
-        id: meta
+      - name: Capture sync metadata
+        id: sync_meta
         shell: bash
         run: |
           set -euo pipefail
@@ -379,33 +87,54 @@ jobs:
           echo "release_tag=upstream-$short" >> "$GITHUB_OUTPUT"
           echo "latest_release_tag=latest-master" >> "$GITHUB_OUTPUT"
 
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: zig-*
-          path: release-assets
-          merge-multiple: true
+      - name: Verify host tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq --version
+          sha256sum --version | head -n 1
 
-      - name: Prepare release asset lists
+      - name: Download Zig master index
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --output index.json https://ziglang.org/download/index.json
+
+      - name: Mirror published master assets
         id: assets
         shell: bash
         run: |
           set -euo pipefail
 
-          short='${{ steps.meta.outputs.short_sha }}'
-          mkdir -p latest-assets
+          version="$(jq -r '.master.version' index.json)"
+          published_date="$(jq -r '.master.date' index.json)"
+
+          mkdir -p release-assets latest-assets
+
+          jq -r '
+            .master
+            | to_entries[]
+            | select(.value | type == "object" and has("tarball"))
+            | [.key, .value.tarball, .value.shasum] | @tsv
+          ' index.json > asset-manifest.tsv
+
+          while IFS=$'\t' read -r key url shasum; do
+            file_name="$(basename "$url")"
+            out_path="release-assets/$file_name"
+            latest_name="${file_name//$version/latest-master}"
+            latest_path="latest-assets/$latest_name"
+
+            curl -L --fail --output "$out_path" "$url"
+            echo "$shasum  $out_path" | sha256sum -c -
+            cp "$out_path" "$latest_path"
+          done < asset-manifest.tsv
 
           find release-assets -maxdepth 1 -type f | sort > release-files.txt
-
-          while IFS= read -r file; do
-            base="$(basename "$file")"
-            latest_name="${base//$short/latest-master}"
-            cp "$file" "latest-assets/$latest_name"
-          done < release-files.txt
-
           find latest-assets -maxdepth 1 -type f | sort > latest-files.txt
 
           {
+            echo "binary_version=$version"
+            echo "published_date=$published_date"
             echo 'release_files<<EOF'
             cat release-files.txt
             echo EOF
@@ -417,32 +146,29 @@ jobs:
       - name: Publish immutable GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.release_tag }}
-          target_commitish: ${{ steps.meta.outputs.sha }}
-          name: Zig upstream master ${{ steps.meta.outputs.short_sha }}
+          tag_name: ${{ steps.sync_meta.outputs.release_tag }}
+          target_commitish: ${{ steps.sync_meta.outputs.sha }}
+          name: Zig upstream master ${{ steps.sync_meta.outputs.short_sha }}
           prerelease: true
           overwrite_files: true
           files: ${{ steps.assets.outputs.release_files }}
           body: |
             Automated sync from Codeberg `master`.
 
-            Upstream commit: `${{ steps.meta.outputs.sha }}`
-            Commit subject: `${{ steps.meta.outputs.subject }}`
+            Synced Codeberg commit: `${{ steps.sync_meta.outputs.sha }}`
+            Commit subject: `${{ steps.sync_meta.outputs.subject }}`
 
-            Included GitHub-hosted release assets:
-            - `zig-linux-x86_64`
-            - `zig-linux-aarch64`
-            - `zig-windows-x86_64`
-            - `zig-windows-aarch64`
-            - `zig-macos-aarch64`
+            Mirrored published Zig `master` assets from `https://ziglang.org/download/`:
+            Version: `${{ steps.assets.outputs.binary_version }}`
+            Published date: `${{ steps.assets.outputs.published_date }}`
 
-            Use the rolling `latest-master` prerelease if you always want the newest successful build.
+            This release mirrors the full published asset set from Zig's current `master` download index, including source, bootstrap, and platform binaries.
 
       - name: Publish rolling latest-master release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.latest_release_tag }}
-          target_commitish: ${{ steps.meta.outputs.sha }}
+          tag_name: ${{ steps.sync_meta.outputs.latest_release_tag }}
+          target_commitish: ${{ steps.sync_meta.outputs.sha }}
           name: Zig latest master
           prerelease: true
           overwrite_files: true
@@ -450,7 +176,11 @@ jobs:
           body: |
             Rolling latest-master prerelease for the newest successful Codeberg `master` sync.
 
-            Upstream commit: `${{ steps.meta.outputs.sha }}`
-            Commit subject: `${{ steps.meta.outputs.subject }}`
+            Synced Codeberg commit: `${{ steps.sync_meta.outputs.sha }}`
+            Commit subject: `${{ steps.sync_meta.outputs.subject }}`
+
+            Mirrored published Zig `master` assets from `https://ziglang.org/download/`:
+            Version: `${{ steps.assets.outputs.binary_version }}`
+            Published date: `${{ steps.assets.outputs.published_date }}`
 
             This tag is intentionally updated in place. Use the per-commit `upstream-<shortsha>` releases for immutable archives.
