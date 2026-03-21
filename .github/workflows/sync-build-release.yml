@@ -91,13 +91,15 @@ jobs:
           script='${{ matrix.ci_script }}'
           target="$(sed -n 's/^TARGET="\([^"]*\)"/\1/p' "$script")"
           mcpu="$(sed -n 's/^MCPU="\([^"]*\)"/\1/p' "$script")"
-          cache_basename="$(sed -n 's/^CACHE_BASENAME="\([^"]*\)"/\1/p' "$script")"
+          cache_template="$(sed -n 's/^CACHE_BASENAME="\([^"]*\)"/\1/p' "$script")"
           short='${{ needs.sync.outputs.short_sha }}'
 
-          if [[ -z "$target" || -z "$mcpu" || -z "$cache_basename" ]]; then
+          if [[ -z "$target" || -z "$mcpu" || -z "$cache_template" ]]; then
             echo "Failed to parse build metadata from $script" >&2
             exit 1
           fi
+
+          cache_basename="${cache_template/\$TARGET/$target}"
 
           echo "target=$target" >> "$GITHUB_OUTPUT"
           echo "mcpu=$mcpu" >> "$GITHUB_OUTPUT"
