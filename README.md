@@ -5,18 +5,24 @@ This repository uses two branches:
 - `master`: mirrors upstream `https://codeberg.org/ziglang/zig` `master`
 - `main`: holds GitHub automation only
 
-The scheduled workflow on `main` force-syncs `master` from Codeberg every 6 hours and mirrors the published Zig `master` release assets from `https://ziglang.org/download/` when upstream changes.
+The scheduled workflow on `main` force-syncs `master` from Codeberg every 6 hours and compiles release assets from the synced source tree when upstream changes.
 
 Release artifacts are built from the synced `master` branch source, not from the automation branch.
 
-It republishes the published `master` asset set, including:
+The workflow uses the published Zig bootstrap source tarball only as a build seed for LLVM/Clang/LLD/zlib/zstd sources. The uploaded release assets are freshly compiled in GitHub Actions from the synced Codeberg commit rather than mirrored from `https://ziglang.org/download/`.
 
-- source and bootstrap tarballs
-- Windows, macOS, Linux, FreeBSD, NetBSD, and OpenBSD binaries for every architecture currently published in the Zig `master` download index
+The current compiled release set includes:
+
+- `zig-x86_64-linux`
+- `zig-aarch64-linux`
+- `zig-x86_64-windows`
+- `zig-aarch64-windows`
+- `zig-x86_64-macos`
+- `zig-aarch64-macos`
 
 It publishes two release styles:
 
 - immutable per-commit prereleases such as `upstream-<shortsha>`
 - a rolling `latest-master` prerelease with stable asset names for "give me the newest build"
 
-Release assets are mirrored from the official Zig download index rather than rebuilt on GitHub-hosted runners, which avoids upstream CI dependencies that are not publicly downloadable.
+`workflow_dispatch` also accepts a `release_scope` input so a single group can be rebuilt for validation without publishing a partial release.
