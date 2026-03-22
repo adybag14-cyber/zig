@@ -14,7 +14,7 @@ on:
           - windows
           - macos
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 */8 * * *"
 
 permissions:
   contents: write
