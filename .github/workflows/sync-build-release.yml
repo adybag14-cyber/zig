@@ -152,8 +152,8 @@ jobs:
             echo "bootstrap_seed_date=$bootstrap_seed_date"
           } >> "$GITHUB_OUTPUT"
 
-  build_linux:
-    name: Build Linux Release Assets
+  build_x86_64_linux:
+    name: Build zig-x86_64-linux Release Asset
     needs:
       - sync
       - metadata
@@ -207,7 +207,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"
           rsync -a --delete --exclude '.git' zig-source/ "$RUNNER_TEMP/bootstrap/zig/"
 
-      - name: Build compiled Linux assets
+      - name: Build compiled zig-x86_64-linux asset
         shell: bash
         env:
           CC: clang
@@ -221,19 +221,97 @@ jobs:
             "$RUNNER_TEMP/bootstrap" \
             '${{ needs.metadata.outputs.zig_version }}' \
             "$RUNNER_TEMP/dist" \
-            x86_64-linux-musl \
-            aarch64-linux-musl
+            x86_64-linux-musl
 
-      - name: Upload compiled Linux assets
+      - name: Upload compiled zig-x86_64-linux asset
         uses: actions/upload-artifact@v4
         with:
-          name: compiled-assets-linux
+          name: compiled-assets-zig-x86_64-linux
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error
           retention-days: 7
 
-  build_windows:
-    name: Build Windows Release Assets
+  build_aarch64_linux:
+    name: Build zig-aarch64-linux Release Asset
+    needs:
+      - sync
+      - metadata
+    if: needs.sync.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.release_scope == 'all' || github.event.inputs.release_scope == 'linux')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 480
+    steps:
+      - name: Checkout automation branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: automation
+
+      - name: Checkout synced master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 1
+          path: zig-source
+
+      - name: Verify synced master checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sha="$(git -C zig-source rev-parse HEAD)"
+          expected='${{ needs.metadata.outputs.sha }}'
+
+          if [[ "$sha" != "$expected" ]]; then
+            echo "Expected upstream SHA $expected but checked out $sha" >&2
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev
+
+      - name: Prepare bootstrap sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/bootstrap"
+          curl -L --fail --output "$RUNNER_TEMP/bootstrap.tar.xz" '${{ needs.metadata.outputs.bootstrap_tarball }}'
+          tar -xJf "$RUNNER_TEMP/bootstrap.tar.xz" -C "$RUNNER_TEMP/bootstrap" --strip-components=1
+
+          rm -rf "$RUNNER_TEMP/bootstrap/zig"
+          mkdir -p "$RUNNER_TEMP/bootstrap/zig"
+          rsync -a --delete --exclude '.git' zig-source/ "$RUNNER_TEMP/bootstrap/zig/"
+
+      - name: Build compiled zig-aarch64-linux asset
+        shell: bash
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/dist"
+
+          bash automation/scripts/build-zig-bootstrap-group.sh \
+            "$RUNNER_TEMP/bootstrap" \
+            '${{ needs.metadata.outputs.zig_version }}' \
+            "$RUNNER_TEMP/dist" \
+            aarch64-linux-musl
+
+      - name: Upload compiled zig-aarch64-linux asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-assets-zig-aarch64-linux
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  build_x86_64_windows:
+    name: Build zig-x86_64-windows Release Asset
     needs:
       - sync
       - metadata
@@ -287,7 +365,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"
           rsync -a --delete --exclude '.git' zig-source/ "$RUNNER_TEMP/bootstrap/zig/"
 
-      - name: Build compiled Windows assets
+      - name: Build compiled zig-x86_64-windows asset
         shell: bash
         env:
           CC: clang
@@ -301,19 +379,97 @@ jobs:
             "$RUNNER_TEMP/bootstrap" \
             '${{ needs.metadata.outputs.zig_version }}' \
             "$RUNNER_TEMP/dist" \
-            x86_64-windows-gnu \
-            aarch64-windows-gnu
+            x86_64-windows-gnu
 
-      - name: Upload compiled Windows assets
+      - name: Upload compiled zig-x86_64-windows asset
         uses: actions/upload-artifact@v4
         with:
-          name: compiled-assets-windows
+          name: compiled-assets-zig-x86_64-windows
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error
           retention-days: 7
 
-  build_macos:
-    name: Build macOS Release Assets
+  build_aarch64_windows:
+    name: Build zig-aarch64-windows Release Asset
+    needs:
+      - sync
+      - metadata
+    if: needs.sync.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.release_scope == 'all' || github.event.inputs.release_scope == 'windows')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 480
+    steps:
+      - name: Checkout automation branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: automation
+
+      - name: Checkout synced master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 1
+          path: zig-source
+
+      - name: Verify synced master checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sha="$(git -C zig-source rev-parse HEAD)"
+          expected='${{ needs.metadata.outputs.sha }}'
+
+          if [[ "$sha" != "$expected" ]]; then
+            echo "Expected upstream SHA $expected but checked out $sha" >&2
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev
+
+      - name: Prepare bootstrap sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/bootstrap"
+          curl -L --fail --output "$RUNNER_TEMP/bootstrap.tar.xz" '${{ needs.metadata.outputs.bootstrap_tarball }}'
+          tar -xJf "$RUNNER_TEMP/bootstrap.tar.xz" -C "$RUNNER_TEMP/bootstrap" --strip-components=1
+
+          rm -rf "$RUNNER_TEMP/bootstrap/zig"
+          mkdir -p "$RUNNER_TEMP/bootstrap/zig"
+          rsync -a --delete --exclude '.git' zig-source/ "$RUNNER_TEMP/bootstrap/zig/"
+
+      - name: Build compiled zig-aarch64-windows asset
+        shell: bash
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/dist"
+
+          bash automation/scripts/build-zig-bootstrap-group.sh \
+            "$RUNNER_TEMP/bootstrap" \
+            '${{ needs.metadata.outputs.zig_version }}' \
+            "$RUNNER_TEMP/dist" \
+            aarch64-windows-gnu
+
+      - name: Upload compiled zig-aarch64-windows asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-assets-zig-aarch64-windows
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  build_x86_64_macos:
+    name: Build zig-x86_64-macos Release Asset
     needs:
       - sync
       - metadata
@@ -367,7 +523,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"
           rsync -a --delete --exclude '.git' zig-source/ "$RUNNER_TEMP/bootstrap/zig/"
 
-      - name: Build compiled macOS assets
+      - name: Build compiled zig-x86_64-macos asset
         shell: bash
         env:
           CC: clang
@@ -381,13 +537,91 @@ jobs:
             "$RUNNER_TEMP/bootstrap" \
             '${{ needs.metadata.outputs.zig_version }}' \
             "$RUNNER_TEMP/dist" \
-            x86_64-macos-none \
-            aarch64-macos-none
+            x86_64-macos-none
 
-      - name: Upload compiled macOS assets
+      - name: Upload compiled zig-x86_64-macos asset
         uses: actions/upload-artifact@v4
         with:
-          name: compiled-assets-macos
+          name: compiled-assets-zig-x86_64-macos
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  build_aarch64_macos:
+    name: Build zig-aarch64-macos Release Asset
+    needs:
+      - sync
+      - metadata
+    if: needs.sync.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.release_scope == 'all' || github.event.inputs.release_scope == 'macos')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 480
+    steps:
+      - name: Checkout automation branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: automation
+
+      - name: Checkout synced master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 1
+          path: zig-source
+
+      - name: Verify synced master checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sha="$(git -C zig-source rev-parse HEAD)"
+          expected='${{ needs.metadata.outputs.sha }}'
+
+          if [[ "$sha" != "$expected" ]]; then
+            echo "Expected upstream SHA $expected but checked out $sha" >&2
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev
+
+      - name: Prepare bootstrap sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/bootstrap"
+          curl -L --fail --output "$RUNNER_TEMP/bootstrap.tar.xz" '${{ needs.metadata.outputs.bootstrap_tarball }}'
+          tar -xJf "$RUNNER_TEMP/bootstrap.tar.xz" -C "$RUNNER_TEMP/bootstrap" --strip-components=1
+
+          rm -rf "$RUNNER_TEMP/bootstrap/zig"
+          mkdir -p "$RUNNER_TEMP/bootstrap/zig"
+          rsync -a --delete --exclude '.git' zig-source/ "$RUNNER_TEMP/bootstrap/zig/"
+
+      - name: Build compiled zig-aarch64-macos asset
+        shell: bash
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/dist"
+
+          bash automation/scripts/build-zig-bootstrap-group.sh \
+            "$RUNNER_TEMP/bootstrap" \
+            '${{ needs.metadata.outputs.zig_version }}' \
+            "$RUNNER_TEMP/dist" \
+            aarch64-macos-none
+
+      - name: Upload compiled zig-aarch64-macos asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-assets-zig-aarch64-macos
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error
           retention-days: 7
@@ -397,9 +631,12 @@ jobs:
     needs:
       - sync
       - metadata
-      - build_linux
-      - build_windows
-      - build_macos
+      - build_x86_64_linux
+      - build_aarch64_linux
+      - build_x86_64_windows
+      - build_aarch64_windows
+      - build_x86_64_macos
+      - build_aarch64_macos
     if: needs.sync.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.release_scope == 'all')
     runs-on: ubuntu-24.04
     steps:
