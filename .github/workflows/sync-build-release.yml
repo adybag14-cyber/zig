@@ -84,6 +84,7 @@ jobs:
       bootstrap_tarball: ${{ steps.meta.outputs.bootstrap_tarball }}
       bootstrap_seed_version: ${{ steps.meta.outputs.bootstrap_seed_version }}
       bootstrap_seed_date: ${{ steps.meta.outputs.bootstrap_seed_date }}
+      required_llvm_major: ${{ steps.meta.outputs.required_llvm_major }}
     steps:
       - name: Checkout automation branch
         uses: actions/checkout@v4
@@ -141,6 +142,13 @@ jobs:
           bootstrap_seed_version="$(jq -r '.master.version' <<<"$index_json")"
           bootstrap_seed_date="$(jq -r '.master.date' <<<"$index_json")"
 
+          required_llvm_major="$(sed -nE 's/.*expected LLVM ([0-9]+)\.x.*/\1/p' zig-source/cmake/Findllvm.cmake | head -n 1)"
+
+          if [[ -z "$required_llvm_major" ]]; then
+            echo "Failed to determine required LLVM major from zig-source/cmake/Findllvm.cmake" >&2
+            exit 1
+          fi
+
           {
             echo "sha=$sha"
             echo "short_sha=$short"
@@ -151,6 +159,7 @@ jobs:
             echo "bootstrap_tarball=$bootstrap_tarball"
             echo "bootstrap_seed_version=$bootstrap_seed_version"
             echo "bootstrap_seed_date=$bootstrap_seed_date"
+            echo "required_llvm_major=$required_llvm_major"
           } >> "$GITHUB_OUTPUT"
 
   build_x86_64_linux:
@@ -200,9 +209,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p "$RUNNER_TEMP/bootstrap"
-          curl -L --fail --output "$RUNNER_TEMP/bootstrap.tar.xz" '${{ needs.metadata.outputs.bootstrap_tarball }}'
-          tar -xJf "$RUNNER_TEMP/bootstrap.tar.xz" -C "$RUNNER_TEMP/bootstrap" --strip-components=1
+          bash automation/scripts/prepare-bootstrap-sources.sh \
+            "$RUNNER_TEMP/bootstrap" \
+            '${{ needs.metadata.outputs.bootstrap_tarball }}' \
+            '${{ needs.metadata.outputs.required_llvm_major }}'
 
           rm -rf "$RUNNER_TEMP/bootstrap/zig"
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"
@@ -279,9 +289,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p "$RUNNER_TEMP/bootstrap"
-          curl -L --fail --output "$RUNNER_TEMP/bootstrap.tar.xz" '${{ needs.metadata.outputs.bootstrap_tarball }}'
-          tar -xJf "$RUNNER_TEMP/bootstrap.tar.xz" -C "$RUNNER_TEMP/bootstrap" --strip-components=1
+          bash automation/scripts/prepare-bootstrap-sources.sh \
+            "$RUNNER_TEMP/bootstrap" \
+            '${{ needs.metadata.outputs.bootstrap_tarball }}' \
+            '${{ needs.metadata.outputs.required_llvm_major }}'
 
           rm -rf "$RUNNER_TEMP/bootstrap/zig"
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"
@@ -358,9 +369,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p "$RUNNER_TEMP/bootstrap"
-          curl -L --fail --output "$RUNNER_TEMP/bootstrap.tar.xz" '${{ needs.metadata.outputs.bootstrap_tarball }}'
-          tar -xJf "$RUNNER_TEMP/bootstrap.tar.xz" -C "$RUNNER_TEMP/bootstrap" --strip-components=1
+          bash automation/scripts/prepare-bootstrap-sources.sh \
+            "$RUNNER_TEMP/bootstrap" \
+            '${{ needs.metadata.outputs.bootstrap_tarball }}' \
+            '${{ needs.metadata.outputs.required_llvm_major }}'
 
           rm -rf "$RUNNER_TEMP/bootstrap/zig"
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"
@@ -437,9 +449,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p "$RUNNER_TEMP/bootstrap"
-          curl -L --fail --output "$RUNNER_TEMP/bootstrap.tar.xz" '${{ needs.metadata.outputs.bootstrap_tarball }}'
-          tar -xJf "$RUNNER_TEMP/bootstrap.tar.xz" -C "$RUNNER_TEMP/bootstrap" --strip-components=1
+          bash automation/scripts/prepare-bootstrap-sources.sh \
+            "$RUNNER_TEMP/bootstrap" \
+            '${{ needs.metadata.outputs.bootstrap_tarball }}' \
+            '${{ needs.metadata.outputs.required_llvm_major }}'
 
           rm -rf "$RUNNER_TEMP/bootstrap/zig"
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"
@@ -516,9 +529,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p "$RUNNER_TEMP/bootstrap"
-          curl -L --fail --output "$RUNNER_TEMP/bootstrap.tar.xz" '${{ needs.metadata.outputs.bootstrap_tarball }}'
-          tar -xJf "$RUNNER_TEMP/bootstrap.tar.xz" -C "$RUNNER_TEMP/bootstrap" --strip-components=1
+          bash automation/scripts/prepare-bootstrap-sources.sh \
+            "$RUNNER_TEMP/bootstrap" \
+            '${{ needs.metadata.outputs.bootstrap_tarball }}' \
+            '${{ needs.metadata.outputs.required_llvm_major }}'
 
           rm -rf "$RUNNER_TEMP/bootstrap/zig"
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"
@@ -595,9 +609,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p "$RUNNER_TEMP/bootstrap"
-          curl -L --fail --output "$RUNNER_TEMP/bootstrap.tar.xz" '${{ needs.metadata.outputs.bootstrap_tarball }}'
-          tar -xJf "$RUNNER_TEMP/bootstrap.tar.xz" -C "$RUNNER_TEMP/bootstrap" --strip-components=1
+          bash automation/scripts/prepare-bootstrap-sources.sh \
+            "$RUNNER_TEMP/bootstrap" \
+            '${{ needs.metadata.outputs.bootstrap_tarball }}' \
+            '${{ needs.metadata.outputs.required_llvm_major }}'
 
           rm -rf "$RUNNER_TEMP/bootstrap/zig"
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"

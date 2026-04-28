@@ -9,7 +9,9 @@ The scheduled workflow on `main` force-syncs `master` from Codeberg every 6 hour
 
 Release artifacts are built from the synced `master` branch source, not from the automation branch.
 
-The workflow uses the published Zig bootstrap source tarball only as a build seed for LLVM/Clang/LLD/zlib/zstd sources. The uploaded release assets are freshly compiled in GitHub Actions from the synced Codeberg commit rather than mirrored from `https://ziglang.org/download/`.
+The workflow uses the published Zig bootstrap source tarball as a build seed for LLVM/Clang/LLD/zlib/zstd sources. If the seed's bundled LLVM major does not match the synced Zig source requirement, automation now automatically overlays LLVM/Clang/LLD/cmake from `llvm-project` `release/<major>.x` before compiling.
+
+The uploaded release assets are freshly compiled in GitHub Actions from the synced Codeberg commit rather than mirrored from `https://ziglang.org/download/`.
 
 The current compiled release set includes:
 
