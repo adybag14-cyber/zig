@@ -13,6 +13,7 @@ on:
           - linux
           - windows
           - macos
+          - sync-only
   schedule:
     - cron: "0 */8 * * *"
 
