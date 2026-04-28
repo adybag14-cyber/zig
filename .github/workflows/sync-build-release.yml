@@ -37,7 +37,7 @@ jobs:
       short_sha: ${{ steps.sync.outputs.short_sha }}
     steps:
       - name: Checkout automation branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -87,13 +87,13 @@ jobs:
       required_llvm_major: ${{ steps.meta.outputs.required_llvm_major }}
     steps:
       - name: Checkout automation branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: main
           path: automation
 
       - name: Checkout synced master
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: master
           fetch-depth: 0
@@ -172,13 +172,13 @@ jobs:
     timeout-minutes: 480
     steps:
       - name: Checkout automation branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: main
           path: automation
 
       - name: Checkout synced master
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: master
           fetch-depth: 1
@@ -235,7 +235,7 @@ jobs:
             x86_64-linux-musl
 
       - name: Upload compiled zig-x86_64-linux asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compiled-assets-zig-x86_64-linux
           path: ${{ runner.temp }}/dist/*
@@ -252,13 +252,13 @@ jobs:
     timeout-minutes: 480
     steps:
       - name: Checkout automation branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: main
           path: automation
 
       - name: Checkout synced master
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: master
           fetch-depth: 1
@@ -315,7 +315,7 @@ jobs:
             aarch64-linux-musl
 
       - name: Upload compiled zig-aarch64-linux asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compiled-assets-zig-aarch64-linux
           path: ${{ runner.temp }}/dist/*
@@ -332,13 +332,13 @@ jobs:
     timeout-minutes: 480
     steps:
       - name: Checkout automation branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: main
           path: automation
 
       - name: Checkout synced master
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: master
           fetch-depth: 1
@@ -395,7 +395,7 @@ jobs:
             x86_64-windows-gnu
 
       - name: Upload compiled zig-x86_64-windows asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compiled-assets-zig-x86_64-windows
           path: ${{ runner.temp }}/dist/*
@@ -412,13 +412,13 @@ jobs:
     timeout-minutes: 480
     steps:
       - name: Checkout automation branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: main
           path: automation
 
       - name: Checkout synced master
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: master
           fetch-depth: 1
@@ -475,7 +475,7 @@ jobs:
             aarch64-windows-gnu
 
       - name: Upload compiled zig-aarch64-windows asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compiled-assets-zig-aarch64-windows
           path: ${{ runner.temp }}/dist/*
@@ -492,13 +492,13 @@ jobs:
     timeout-minutes: 480
     steps:
       - name: Checkout automation branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: main
           path: automation
 
       - name: Checkout synced master
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: master
           fetch-depth: 1
@@ -555,7 +555,7 @@ jobs:
             x86_64-macos-none
 
       - name: Upload compiled zig-x86_64-macos asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compiled-assets-zig-x86_64-macos
           path: ${{ runner.temp }}/dist/*
@@ -572,13 +572,13 @@ jobs:
     timeout-minutes: 480
     steps:
       - name: Checkout automation branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: main
           path: automation
 
       - name: Checkout synced master
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: master
           fetch-depth: 1
@@ -635,7 +635,7 @@ jobs:
             aarch64-macos-none
 
       - name: Upload compiled zig-aarch64-macos asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compiled-assets-zig-aarch64-macos
           path: ${{ runner.temp }}/dist/*
@@ -657,7 +657,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Download compiled assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: compiled-assets-*
           merge-multiple: true
@@ -690,7 +690,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Publish immutable GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.metadata.outputs.release_tag }}
           target_commitish: ${{ needs.metadata.outputs.sha }}
@@ -719,7 +719,7 @@ jobs:
             - `zig-aarch64-macos`
 
       - name: Publish rolling latest-master release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.metadata.outputs.latest_release_tag }}
           target_commitish: ${{ needs.metadata.outputs.sha }}
