@@ -229,6 +229,7 @@ build_target() {
     -DCMAKE_RC_COMPILER="$HOST_PREFIX/bin/llvm-rc" \
     -DCMAKE_AR="$HOST_PREFIX/bin/llvm-ar" \
     -DCMAKE_RANLIB="$HOST_PREFIX/bin/llvm-ranlib" \
+    -DLLVM_FORCE_USE_OLD_TOOLCHAIN=ON \
     -DLLVM_APPEND_VC_REV=OFF \
     -DLLVM_ENABLE_BACKTRACES=OFF \
     -DLLVM_ENABLE_BINDINGS=OFF \
