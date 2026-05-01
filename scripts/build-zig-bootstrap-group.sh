@@ -213,6 +213,13 @@ build_target() {
     # LLVM's zlib probe links a try-compile executable; Darwin cross builds can
     # fail that probe even though the static libz archive was just built.
     llvm_cmake_extra_args+=(-DHAVE_ZLIB=1)
+    # CheckAtomic uses the same cross-link shape and can incorrectly conclude
+    # that Darwin targets need libatomic, which they do not.
+    llvm_cmake_extra_args+=(
+      -DHAVE_CXX_ATOMICS_WITHOUT_LIB=1
+      -DHAVE_CXX_ATOMICS64_WITHOUT_LIB=1
+      -DLLVM_HAS_ATOMICS=1
+    )
   fi
 
   mkdir -p "$ROOTDIR/out/build-zlib-${target}-${MCPU}"
