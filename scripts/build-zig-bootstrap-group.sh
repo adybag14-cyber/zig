@@ -205,8 +205,15 @@ build_target() {
   local cmake_os_name
   local prefix="$ROOTDIR/out/${target}-${MCPU}"
   local zig_prefix="$ROOTDIR/out/zig-${target}-${MCPU}"
+  local llvm_cmake_extra_args=()
 
   cmake_os_name="$(target_os_cmake_name "$target")"
+
+  if [[ "$target" == *-macos-* ]]; then
+    # LLVM's zlib probe links a try-compile executable; Darwin cross builds can
+    # fail that probe even though the static libz archive was just built.
+    llvm_cmake_extra_args+=(-DHAVE_ZLIB=1)
+  fi
 
   mkdir -p "$ROOTDIR/out/build-zlib-${target}-${MCPU}"
   cd "$ROOTDIR/out/build-zlib-${target}-${MCPU}"
@@ -258,6 +265,7 @@ build_target() {
     -DLLVM_ENABLE_PROJECTS="lld;clang" \
     -DLLVM_ENABLE_Z3_SOLVER=OFF \
     -DLLVM_ENABLE_ZLIB=FORCE_ON \
+    "${llvm_cmake_extra_args[@]}" \
     -DLLVM_ENABLE_ZSTD=FORCE_ON \
     -DLLVM_USE_STATIC_ZSTD=ON \
     -DLLVM_TABLEGEN="$HOST_PREFIX/bin/llvm-tblgen" \
