@@ -138,6 +138,7 @@ build_host_toolchain() {
 build_zstd_for_target() {
   local target="$1"
   local prefix="$2"
+  local static_zstd="$prefix/lib/libzstd.a"
 
   mkdir -p "$prefix/include" "$prefix/lib"
   cp "$ROOTDIR/zstd/lib/zstd.h" "$prefix/include/zstd.h"
@@ -183,6 +184,20 @@ build_zstd_for_target() {
     "$ROOTDIR/zstd/lib/dictBuilder/divsufsort.c" \
     "$ROOTDIR/zstd/lib/dictBuilder/fastcover.c" \
     "$ROOTDIR/zstd/lib/dictBuilder/cover.c"
+
+  if [[ "$target" == *windows-gnu && ! -f "$static_zstd" ]]; then
+    if [[ -f "$prefix/lib/zstd.lib" ]]; then
+      cp "$prefix/lib/zstd.lib" "$static_zstd"
+    elif [[ -f "$prefix/lib/libzstd.lib" ]]; then
+      cp "$prefix/lib/libzstd.lib" "$static_zstd"
+    fi
+  fi
+
+  if [[ ! -f "$static_zstd" ]]; then
+    echo "Expected static zstd archive at $static_zstd" >&2
+    find "$prefix/lib" -maxdepth 1 -type f -printf '  %f\n' >&2
+    exit 1
+  fi
 }
 
 build_target() {
@@ -231,6 +246,7 @@ build_target() {
     -DCMAKE_RANLIB="$HOST_PREFIX/bin/llvm-ranlib" \
     -DLLVM_FORCE_USE_OLD_TOOLCHAIN=ON \
     -DLLVM_APPEND_VC_REV=OFF \
+    -DLLVM_ENABLE_PIC=OFF \
     -DLLVM_ENABLE_BACKTRACES=OFF \
     -DLLVM_ENABLE_BINDINGS=OFF \
     -DLLVM_ENABLE_CRASH_OVERRIDES=OFF \

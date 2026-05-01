@@ -15,7 +15,8 @@ on:
           - macos
           - sync-only
   schedule:
-    - cron: "0 */8 * * *"
+    # Avoid :00 start to reduce best-effort schedule drops/delays during peak load.
+    - cron: "23 */8 * * *"
 
 permissions:
   contents: write
