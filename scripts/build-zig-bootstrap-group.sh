@@ -206,10 +206,15 @@ build_target() {
   local prefix="$ROOTDIR/out/${target}-${MCPU}"
   local zig_prefix="$ROOTDIR/out/zig-${target}-${MCPU}"
   local llvm_cmake_extra_args=()
+  local llvm_build_static=ON
+  local llvm_enable_pic=OFF
 
   cmake_os_name="$(target_os_cmake_name "$target")"
 
   if [[ "$target" == *-macos-* ]]; then
+    llvm_build_static=OFF
+    llvm_enable_pic=ON
+
     # LLVM's zlib probe links a try-compile executable; Darwin cross builds can
     # fail that probe even though the static libz archive was just built.
     llvm_cmake_extra_args+=(-DHAVE_ZLIB=1)
@@ -273,7 +278,7 @@ build_target() {
     -DCMAKE_RANLIB="$HOST_PREFIX/bin/llvm-ranlib" \
     -DLLVM_FORCE_USE_OLD_TOOLCHAIN=ON \
     -DLLVM_APPEND_VC_REV=OFF \
-    -DLLVM_ENABLE_PIC=OFF \
+    -DLLVM_ENABLE_PIC="$llvm_enable_pic" \
     -DLLVM_ENABLE_BACKTRACES=OFF \
     -DLLVM_ENABLE_BINDINGS=OFF \
     -DLLVM_ENABLE_CRASH_OVERRIDES=OFF \
@@ -291,7 +296,8 @@ build_target() {
     -DLLVM_TABLEGEN="$HOST_PREFIX/bin/llvm-tblgen" \
     -DLLVM_BUILD_UTILS=OFF \
     -DLLVM_BUILD_TOOLS=OFF \
-    -DLLVM_BUILD_STATIC=ON \
+    -DLLVM_BUILD_STATIC="$llvm_build_static" \
+    -DLLVM_INCLUDE_TOOLS=OFF \
     -DLLVM_INCLUDE_UTILS=OFF \
     -DLLVM_INCLUDE_TESTS=OFF \
     -DLLVM_INCLUDE_EXAMPLES=OFF \
