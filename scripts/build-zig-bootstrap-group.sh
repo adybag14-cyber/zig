@@ -220,6 +220,13 @@ build_target() {
       -DHAVE_CXX_ATOMICS64_WITHOUT_LIB=1
       -DLLVM_HAS_ATOMICS=1
     )
+    # Darwin provides these, but CMake's cross-link probes can fail before
+    # LLVM writes the config header used by Support/Unix/Process.inc.
+    llvm_cmake_extra_args+=(
+      -DHAVE_GETPAGESIZE=1
+      -DHAVE_SYSCONF=1
+      -DHAVE_GETRUSAGE=1
+    )
   fi
 
   mkdir -p "$ROOTDIR/out/build-zlib-${target}-${MCPU}"
