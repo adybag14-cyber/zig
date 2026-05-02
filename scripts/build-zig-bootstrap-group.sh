@@ -227,6 +227,12 @@ build_target() {
       -DHAVE_SYSCONF=1
       -DHAVE_GETRUSAGE=1
     )
+    # Darwin has pthread rwlocks through libSystem; avoid LLVM's target
+    # try-link fallback path, which leaves RWMutex.cpp without MutexImpl.
+    llvm_cmake_extra_args+=(
+      -DHAVE_PTHREAD_H=1
+      -DHAVE_PTHREAD_RWLOCK_INIT=1
+    )
   fi
 
   mkdir -p "$ROOTDIR/out/build-zlib-${target}-${MCPU}"
