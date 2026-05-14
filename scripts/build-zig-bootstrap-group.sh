@@ -4,6 +4,7 @@ set -euo pipefail
 
 if (( $# < 4 )); then
   echo "usage: $0 <bootstrap-root> <zig-version> <asset-dir> <target> [<target> ...]" >&2
+  echo "       $0 <bootstrap-root> <zig-version> <asset-dir> --host-only" >&2
   exit 1
 fi
 
@@ -11,6 +12,15 @@ ROOTDIR="$(cd "$1" && pwd)"
 ZIG_VERSION="$2"
 ASSET_DIR="$3"
 shift 3
+
+HOST_ONLY=0
+if [[ "${1:-}" == "--host-only" ]]; then
+  if (( $# != 1 )); then
+    echo "--host-only cannot be combined with release targets" >&2
+    exit 1
+  fi
+  HOST_ONLY=1
+fi
 
 mkdir -p "$ASSET_DIR"
 ASSET_DIR="$(cd "$ASSET_DIR" && pwd)"
@@ -115,6 +125,7 @@ build_host_toolchain() {
     -DLLVM_TOOL_LLVM_LTO_BUILD=OFF \
     -DLLVM_TOOL_LTO_BUILD=OFF \
     -DLLVM_TOOL_REMARKS_SHLIB_BUILD=OFF \
+    -DCLANG_ENABLE_ARCMT=OFF \
     -DCLANG_BUILD_TOOLS=OFF \
     -DCLANG_INCLUDE_DOCS=OFF \
     -DCLANG_INCLUDE_TESTS=OFF \
@@ -309,6 +320,7 @@ build_target() {
     -DLLVM_TOOL_LTO_BUILD=OFF \
     -DLLVM_TOOL_REMARKS_SHLIB_BUILD=OFF \
     -DCLANG_TABLEGEN="$ROOTDIR/out/build-llvm-host/bin/clang-tblgen" \
+    -DCLANG_ENABLE_ARCMT=OFF \
     -DCLANG_BUILD_TOOLS=OFF \
     -DCLANG_INCLUDE_DOCS=OFF \
     -DCLANG_INCLUDE_TESTS=OFF \
@@ -344,6 +356,10 @@ mkdir -p "$ROOTDIR/out/package"
 
 if [[ ! -x "$HOST_ZIG" ]]; then
   build_host_toolchain
+fi
+
+if (( HOST_ONLY )); then
+  exit 0
 fi
 
 for target in "$@"; do

@@ -163,11 +163,127 @@ jobs:
             echo "required_llvm_major=$required_llvm_major"
           } >> "$GITHUB_OUTPUT"
 
+  build_host_toolchain:
+    name: Build reusable bootstrap host toolchain
+    needs:
+      - sync
+      - metadata
+    if: needs.sync.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.release_scope != 'sync-only')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout automation branch
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          path: automation
+
+      - name: Checkout synced master
+        uses: actions/checkout@v6
+        with:
+          ref: master
+          fetch-depth: 1
+          path: zig-source
+
+      - name: Verify synced master checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sha="$(git -C zig-source rev-parse HEAD)"
+          expected='${{ needs.metadata.outputs.sha }}'
+
+          if [[ "$sha" != "$expected" ]]; then
+            echo "Expected upstream SHA $expected but checked out $sha" >&2
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev zstd
+
+      - name: Prepare bootstrap sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bash automation/scripts/prepare-bootstrap-sources.sh \
+            "$RUNNER_TEMP/bootstrap" \
+            '${{ needs.metadata.outputs.bootstrap_tarball }}' \
+            '${{ needs.metadata.outputs.required_llvm_major }}'
+
+          rm -rf "$RUNNER_TEMP/bootstrap/zig"
+          mkdir -p "$RUNNER_TEMP/bootstrap/zig"
+          rsync -a --delete --exclude '.git' zig-source/ "$RUNNER_TEMP/bootstrap/zig/"
+
+      - name: Build bootstrap host toolchain
+        shell: bash
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/dist"
+
+          bash automation/scripts/build-zig-bootstrap-group.sh \
+            "$RUNNER_TEMP/bootstrap" \
+            '${{ needs.metadata.outputs.zig_version }}' \
+            "$RUNNER_TEMP/dist" \
+            --host-only
+
+          test -x "$RUNNER_TEMP/bootstrap/out/host/bin/zig"
+          test -x "$RUNNER_TEMP/bootstrap/out/host/bin/llvm-tblgen"
+          test -x "$RUNNER_TEMP/bootstrap/out/build-llvm-host/bin/clang-tblgen"
+          test -d "$RUNNER_TEMP/bootstrap/out/host/lib/zig/std"
+          "$RUNNER_TEMP/bootstrap/out/host/bin/zig" version
+
+      - name: Pack bootstrap host toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          stage="$RUNNER_TEMP/bootstrap-host-toolchain"
+          rm -rf "$stage"
+          mkdir -p \
+            "$stage/out/host/bin" \
+            "$stage/out/host/lib" \
+            "$stage/out/build-llvm-host/bin"
+
+          for tool in zig llvm-tblgen llvm-rc llvm-ar llvm-ranlib; do
+            cp "$RUNNER_TEMP/bootstrap/out/host/bin/$tool" "$stage/out/host/bin/$tool"
+          done
+
+          cp "$RUNNER_TEMP/bootstrap/out/build-llvm-host/bin/clang-tblgen" \
+            "$stage/out/build-llvm-host/bin/clang-tblgen"
+          cp -a "$RUNNER_TEMP/bootstrap/out/host/lib/zig" "$stage/out/host/lib/zig"
+
+          "$stage/out/host/bin/zig" version
+          test -d "$stage/out/host/lib/zig/std"
+
+          tar --use-compress-program 'zstd -T0 -3' \
+            -cf "$RUNNER_TEMP/host-bootstrap.tar.zst" \
+            -C "$stage" \
+            out
+
+      - name: Upload bootstrap host toolchain
+        uses: actions/upload-artifact@v7
+        with:
+          name: bootstrap-host-toolchain
+          path: ${{ runner.temp }}/host-bootstrap.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   build_x86_64_linux:
     name: Build zig-x86_64-linux Release Asset
     needs:
       - sync
       - metadata
+      - build_host_toolchain
     if: needs.sync.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.release_scope == 'all' || github.event.inputs.release_scope == 'linux')
     runs-on: ubuntu-24.04
     timeout-minutes: 480
@@ -203,7 +319,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev
+          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev zstd
 
       - name: Prepare bootstrap sources
         shell: bash
@@ -218,6 +334,27 @@ jobs:
           rm -rf "$RUNNER_TEMP/bootstrap/zig"
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"
           rsync -a --delete --exclude '.git' zig-source/ "$RUNNER_TEMP/bootstrap/zig/"
+
+      - name: Download bootstrap host toolchain
+        uses: actions/download-artifact@v8
+        with:
+          name: bootstrap-host-toolchain
+          path: ${{ runner.temp }}
+
+      - name: Restore bootstrap host toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tar --use-compress-program 'zstd -d -T0' \
+            -xf "$RUNNER_TEMP/host-bootstrap.tar.zst" \
+            -C "$RUNNER_TEMP/bootstrap"
+
+          test -x "$RUNNER_TEMP/bootstrap/out/host/bin/zig"
+          test -x "$RUNNER_TEMP/bootstrap/out/host/bin/llvm-tblgen"
+          test -x "$RUNNER_TEMP/bootstrap/out/build-llvm-host/bin/clang-tblgen"
+          test -d "$RUNNER_TEMP/bootstrap/out/host/lib/zig/std"
+          "$RUNNER_TEMP/bootstrap/out/host/bin/zig" version
 
       - name: Build compiled zig-x86_64-linux asset
         shell: bash
@@ -242,12 +379,14 @@ jobs:
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
 
   build_aarch64_linux:
     name: Build zig-aarch64-linux Release Asset
     needs:
       - sync
       - metadata
+      - build_host_toolchain
     if: needs.sync.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.release_scope == 'all' || github.event.inputs.release_scope == 'linux')
     runs-on: ubuntu-24.04
     timeout-minutes: 480
@@ -283,7 +422,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev
+          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev zstd
 
       - name: Prepare bootstrap sources
         shell: bash
@@ -298,6 +437,27 @@ jobs:
           rm -rf "$RUNNER_TEMP/bootstrap/zig"
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"
           rsync -a --delete --exclude '.git' zig-source/ "$RUNNER_TEMP/bootstrap/zig/"
+
+      - name: Download bootstrap host toolchain
+        uses: actions/download-artifact@v8
+        with:
+          name: bootstrap-host-toolchain
+          path: ${{ runner.temp }}
+
+      - name: Restore bootstrap host toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tar --use-compress-program 'zstd -d -T0' \
+            -xf "$RUNNER_TEMP/host-bootstrap.tar.zst" \
+            -C "$RUNNER_TEMP/bootstrap"
+
+          test -x "$RUNNER_TEMP/bootstrap/out/host/bin/zig"
+          test -x "$RUNNER_TEMP/bootstrap/out/host/bin/llvm-tblgen"
+          test -x "$RUNNER_TEMP/bootstrap/out/build-llvm-host/bin/clang-tblgen"
+          test -d "$RUNNER_TEMP/bootstrap/out/host/lib/zig/std"
+          "$RUNNER_TEMP/bootstrap/out/host/bin/zig" version
 
       - name: Build compiled zig-aarch64-linux asset
         shell: bash
@@ -322,12 +482,14 @@ jobs:
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
 
   build_x86_64_windows:
     name: Build zig-x86_64-windows Release Asset
     needs:
       - sync
       - metadata
+      - build_host_toolchain
     if: needs.sync.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.release_scope == 'all' || github.event.inputs.release_scope == 'windows')
     runs-on: ubuntu-24.04
     timeout-minutes: 480
@@ -363,7 +525,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev
+          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev zstd
 
       - name: Prepare bootstrap sources
         shell: bash
@@ -378,6 +540,27 @@ jobs:
           rm -rf "$RUNNER_TEMP/bootstrap/zig"
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"
           rsync -a --delete --exclude '.git' zig-source/ "$RUNNER_TEMP/bootstrap/zig/"
+
+      - name: Download bootstrap host toolchain
+        uses: actions/download-artifact@v8
+        with:
+          name: bootstrap-host-toolchain
+          path: ${{ runner.temp }}
+
+      - name: Restore bootstrap host toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tar --use-compress-program 'zstd -d -T0' \
+            -xf "$RUNNER_TEMP/host-bootstrap.tar.zst" \
+            -C "$RUNNER_TEMP/bootstrap"
+
+          test -x "$RUNNER_TEMP/bootstrap/out/host/bin/zig"
+          test -x "$RUNNER_TEMP/bootstrap/out/host/bin/llvm-tblgen"
+          test -x "$RUNNER_TEMP/bootstrap/out/build-llvm-host/bin/clang-tblgen"
+          test -d "$RUNNER_TEMP/bootstrap/out/host/lib/zig/std"
+          "$RUNNER_TEMP/bootstrap/out/host/bin/zig" version
 
       - name: Build compiled zig-x86_64-windows asset
         shell: bash
@@ -402,12 +585,14 @@ jobs:
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
 
   build_aarch64_windows:
     name: Build zig-aarch64-windows Release Asset
     needs:
       - sync
       - metadata
+      - build_host_toolchain
     if: needs.sync.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.release_scope == 'all' || github.event.inputs.release_scope == 'windows')
     runs-on: ubuntu-24.04
     timeout-minutes: 480
@@ -443,7 +628,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev
+          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev zstd
 
       - name: Prepare bootstrap sources
         shell: bash
@@ -458,6 +643,27 @@ jobs:
           rm -rf "$RUNNER_TEMP/bootstrap/zig"
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"
           rsync -a --delete --exclude '.git' zig-source/ "$RUNNER_TEMP/bootstrap/zig/"
+
+      - name: Download bootstrap host toolchain
+        uses: actions/download-artifact@v8
+        with:
+          name: bootstrap-host-toolchain
+          path: ${{ runner.temp }}
+
+      - name: Restore bootstrap host toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tar --use-compress-program 'zstd -d -T0' \
+            -xf "$RUNNER_TEMP/host-bootstrap.tar.zst" \
+            -C "$RUNNER_TEMP/bootstrap"
+
+          test -x "$RUNNER_TEMP/bootstrap/out/host/bin/zig"
+          test -x "$RUNNER_TEMP/bootstrap/out/host/bin/llvm-tblgen"
+          test -x "$RUNNER_TEMP/bootstrap/out/build-llvm-host/bin/clang-tblgen"
+          test -d "$RUNNER_TEMP/bootstrap/out/host/lib/zig/std"
+          "$RUNNER_TEMP/bootstrap/out/host/bin/zig" version
 
       - name: Build compiled zig-aarch64-windows asset
         shell: bash
@@ -482,12 +688,14 @@ jobs:
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
 
   build_x86_64_macos:
     name: Build zig-x86_64-macos Release Asset
     needs:
       - sync
       - metadata
+      - build_host_toolchain
     if: needs.sync.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.release_scope == 'all' || github.event.inputs.release_scope == 'macos')
     runs-on: ubuntu-24.04
     timeout-minutes: 480
@@ -523,7 +731,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev
+          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev zstd
 
       - name: Prepare bootstrap sources
         shell: bash
@@ -538,6 +746,27 @@ jobs:
           rm -rf "$RUNNER_TEMP/bootstrap/zig"
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"
           rsync -a --delete --exclude '.git' zig-source/ "$RUNNER_TEMP/bootstrap/zig/"
+
+      - name: Download bootstrap host toolchain
+        uses: actions/download-artifact@v8
+        with:
+          name: bootstrap-host-toolchain
+          path: ${{ runner.temp }}
+
+      - name: Restore bootstrap host toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tar --use-compress-program 'zstd -d -T0' \
+            -xf "$RUNNER_TEMP/host-bootstrap.tar.zst" \
+            -C "$RUNNER_TEMP/bootstrap"
+
+          test -x "$RUNNER_TEMP/bootstrap/out/host/bin/zig"
+          test -x "$RUNNER_TEMP/bootstrap/out/host/bin/llvm-tblgen"
+          test -x "$RUNNER_TEMP/bootstrap/out/build-llvm-host/bin/clang-tblgen"
+          test -d "$RUNNER_TEMP/bootstrap/out/host/lib/zig/std"
+          "$RUNNER_TEMP/bootstrap/out/host/bin/zig" version
 
       - name: Build compiled zig-x86_64-macos asset
         shell: bash
@@ -562,12 +791,14 @@ jobs:
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
 
   build_aarch64_macos:
     name: Build zig-aarch64-macos Release Asset
     needs:
       - sync
       - metadata
+      - build_host_toolchain
     if: needs.sync.outputs.changed == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.release_scope == 'all' || github.event.inputs.release_scope == 'macos')
     runs-on: ubuntu-24.04
     timeout-minutes: 480
@@ -603,7 +834,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev
+          sudo apt-get install -y clang cmake ninja-build pkg-config rsync xz-utils zip zlib1g-dev zstd
 
       - name: Prepare bootstrap sources
         shell: bash
@@ -618,6 +849,25 @@ jobs:
           rm -rf "$RUNNER_TEMP/bootstrap/zig"
           mkdir -p "$RUNNER_TEMP/bootstrap/zig"
           rsync -a --delete --exclude '.git' zig-source/ "$RUNNER_TEMP/bootstrap/zig/"
+
+      - name: Download bootstrap host toolchain
+        uses: actions/download-artifact@v8
+        with:
+          name: bootstrap-host-toolchain
+          path: ${{ runner.temp }}
+
+      - name: Restore bootstrap host toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tar --use-compress-program 'zstd -d -T0' \
+            -xf "$RUNNER_TEMP/host-bootstrap.tar.zst" \
+            -C "$RUNNER_TEMP/bootstrap"
+
+          test -x "$RUNNER_TEMP/bootstrap/out/host/bin/zig"
+          test -x "$RUNNER_TEMP/bootstrap/out/host/bin/llvm-tblgen"
+          test -x "$RUNNER_TEMP/bootstrap/out/build-llvm-host/bin/clang-tblgen"
 
       - name: Build compiled zig-aarch64-macos asset
         shell: bash
@@ -642,6 +892,7 @@ jobs:
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
 
   publish_release:
     name: Publish GitHub Releases
