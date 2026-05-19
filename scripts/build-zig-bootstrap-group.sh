@@ -26,6 +26,7 @@ mkdir -p "$ASSET_DIR"
 ASSET_DIR="$(cd "$ASSET_DIR" && pwd)"
 
 MCPU="${MCPU:-baseline}"
+HOST_MCPU="${HOST_MCPU:-baseline}"
 BUILD_JOBS="${BUILD_JOBS:-4}"
 HOST_PREFIX="$ROOTDIR/out/host"
 HOST_ZIG="$HOST_PREFIX/bin/zig"
@@ -142,6 +143,7 @@ build_host_toolchain() {
     -DCMAKE_INSTALL_PREFIX="$HOST_PREFIX" \
     -DCMAKE_PREFIX_PATH="$HOST_PREFIX" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DZIG_TARGET_MCPU="$HOST_MCPU" \
     -DZIG_VERSION="$ZIG_VERSION"
   cmake_build
 }

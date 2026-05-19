@@ -27,6 +27,7 @@ concurrency:
 
 env:
   BUILD_JOBS: "4"
+  HOST_MCPU: baseline
   MCPU: baseline
 
 jobs:
