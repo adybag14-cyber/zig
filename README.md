@@ -27,4 +27,6 @@ It publishes two release styles:
 - immutable per-commit prereleases such as `upstream-<shortsha>`
 - a rolling `latest-master` prerelease with stable asset names for "give me the newest build"
 
+Before each publish, existing assets on those release tags are removed so `latest-master` contains only the freshly built current target set and cannot retain stale artifacts from older target matrices.
+
 `workflow_dispatch` also accepts a `release_scope` input so a single group can be rebuilt for validation without publishing a partial release.
