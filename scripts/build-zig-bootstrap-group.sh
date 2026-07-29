@@ -138,11 +138,16 @@ build_host_toolchain() {
 
   mkdir -p "$ROOTDIR/out/build-zig-host"
   cd "$ROOTDIR/out/build-zig-host"
+  # Host zig2 compiles generated compiler_rt.c with -std=c99. That translation unit
+  # aliases libc long-double math (sinl/cosl/...) via zig_mangled_export; clang rejects
+  # those as undeclared library functions unless <math.h> is visible. Force-include it
+  # for the host zig C sources so bootstrap does not fail on recent clang/glibc.
   cmake "$ROOTDIR/zig" \
     -G Ninja \
     -DCMAKE_INSTALL_PREFIX="$HOST_PREFIX" \
     -DCMAKE_PREFIX_PATH="$HOST_PREFIX" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_FLAGS="-include math.h" \
     -DZIG_TARGET_MCPU="$HOST_MCPU" \
     -DZIG_VERSION="$ZIG_VERSION"
   cmake_build
