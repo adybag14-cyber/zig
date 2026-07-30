@@ -51,6 +51,8 @@ jobs:
       - name: Sync master from Codeberg
         id: sync
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -60,15 +62,54 @@ jobs:
           before="$(git ls-remote origin refs/heads/master | awk '{print $1}')"
           after="$(git rev-parse refs/remotes/upstream/master)"
           short="${after::12}"
+          release_tag="upstream-$short"
+          latest_release_tag="latest-master"
 
           echo "upstream_sha=$after" >> "$GITHUB_OUTPUT"
           echo "short_sha=$short" >> "$GITHUB_OUTPUT"
 
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" || "$before" != "$after" ]]; then
+          release_has_six_assets() {
+            local tag="$1"
+            local asset_mode="$2"
+            local release_json
+            local target
+            local matching_assets
+
+            if ! release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/$tag" 2>/dev/null)"; then
+              return 1
+            fi
+
+            read -r target matching_assets < <(
+              python3 -c 'import json,re,sys; data=json.load(sys.stdin); mode=sys.argv[1]; pattern=re.compile(r"^zig-(x86_64|aarch64)-(linux|windows|macos)-"); names=[asset.get("name", "") for asset in data.get("assets", [])]; matching=[name for name in names if pattern.search(name) and ((mode == "rolling" and "latest-master" in name) or (mode != "rolling" and "latest-master" not in name))]; print(data.get("target_commitish", ""), len(matching))' "$asset_mode" <<<"$release_json"
+            )
+
+            [[ "$target" == "$after" && "$matching_assets" -eq 6 ]]
+          }
+
+          immutable_complete=false
+          rolling_complete=false
+          if release_has_six_assets "$release_tag" "immutable"; then
+            immutable_complete=true
+          fi
+          if release_has_six_assets "$latest_release_tag" "rolling"; then
+            rolling_complete=true
+          fi
+
+          mirror_changed=false
+          if [[ "$before" != "$after" ]]; then
+            mirror_changed=true
             git push --force origin "refs/remotes/upstream/master:refs/heads/master"
+          fi
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ||
+                "$mirror_changed" == "true" ||
+                "$immutable_complete" != "true" ||
+                "$rolling_complete" != "true" ]]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Release build required: mirror_changed=$mirror_changed immutable_complete=$immutable_complete rolling_complete=$rolling_complete"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Mirror and both six-asset releases are complete for $after."
           fi
 
   metadata:
