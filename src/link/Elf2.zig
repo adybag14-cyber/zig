@@ -8933,7 +8933,7 @@ fn updateFuncInner(
 
             const debug = &debug_output_buf;
             debug.pt = pt;
-            debug.any_children = false;
+            debug.empty = true;
             debug.blocks = .empty;
             dwarf_func.state = .resolved;
 

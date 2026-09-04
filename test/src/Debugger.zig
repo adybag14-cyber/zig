@@ -1946,7 +1946,7 @@ pub fn addTests(db: *Debugger) void {
             \\     frame #1: inline_call`m1pfi(m1pai=89) at mod1.zig:23:15
             \\     frame #2: inline_call`root0.main at root0.zig:41:15
         },
-        .{ .skip_new_linker = true },
+        .{},
     );
     db.addLldbTest(
         "link_object",
