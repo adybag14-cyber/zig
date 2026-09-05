@@ -10,7 +10,7 @@ consts: std.ArrayList(Const),
 globals: std.array_hash_map.Auto(InternPool.Nav.Index, Global),
 funcs: std.array_hash_map.Auto(InternPool.Nav.Index, Func),
 decls: std.array_hash_map.Auto(InternPool.TrackedInst.Index, Decl),
-pending_decl: struct { di: Decl.Index, instance_val: InternPool.Index },
+pending_decl: struct { di: Decl.Index, instance: Decl.Instance },
 
 debug_abbrev: Abbrev,
 frame: Frame,
@@ -154,6 +154,12 @@ pub const Decl = struct {
         pub fn get(di: Decl.Index, dwarf: *Dwarf) *Decl {
             return &dwarf.decls.values()[@backingInt(di)];
         }
+    };
+
+    const Instance = union(enum) {
+        none,
+        @"const": InternPool.Index,
+        global: InternPool.Nav.Index,
     };
 };
 
@@ -1258,7 +1264,7 @@ pub fn init(lf: *link.File, format: DW.Format) Dwarf {
         .globals = .empty,
         .funcs = .empty,
         .decls = .empty,
-        .pending_decl = .{ .di = undefined, .instance_val = .none },
+        .pending_decl = .{ .di = undefined, .instance = .none },
 
         .debug_abbrev = .{
             .ni = .none,
@@ -1468,7 +1474,7 @@ pub fn getFuncIfExists(dwarf: *Dwarf, nav: InternPool.Nav.Index) ?Func.Index {
     return @fromBackingInt(@intCast(dwarf.funcs.getIndex(nav) orelse return null));
 }
 
-fn getDeclInst(dwarf: *Dwarf, val: InternPool.Index) ?InternPool.TrackedInst.Index {
+fn getConstDeclInst(dwarf: *Dwarf, val: InternPool.Index) ?InternPool.TrackedInst.Index {
     const ip = &dwarf.lf.comp.zcu.?.intern_pool;
     switch (ip.indexToKey(val)) {
         else => unreachable,
@@ -1511,26 +1517,41 @@ fn getDeclInst(dwarf: *Dwarf, val: InternPool.Index) ?InternPool.TrackedInst.Ind
         }).srcInst(ip),
     }
 }
-pub fn getDecl(
+fn getConstDecl(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
-    instance_val: InternPool.Index,
+    instance_const: InternPool.Index,
+) link.Error!link.MappedFile.Node.Index {
+    return dwarf.getDecl(pt, dwarf.getConstDeclInst(instance_const) orelse {
+        const cpi = try dwarf.getConst(pt, .fromInterned(instance_const));
+        return Const.get(cpi, dwarf).debug_info_ni.unwrap().?;
+    }, .{ .@"const" = instance_const });
+}
+fn getGlobalDecl(
+    dwarf: *Dwarf,
+    pt: Zcu.PerThread,
+    instance_global: InternPool.Nav.Index,
+) link.Error!link.MappedFile.Node.Index {
+    const ip = &pt.zcu.intern_pool;
+    return dwarf.getDecl(pt, ip.getNav(instance_global).srcInst(ip), .{ .global = instance_global });
+}
+fn getDecl(
+    dwarf: *Dwarf,
+    pt: Zcu.PerThread,
+    inst: InternPool.TrackedInst.Index,
+    instance: Decl.Instance,
 ) link.Error!link.MappedFile.Node.Index {
     const comp = dwarf.lf.comp;
     const gpa = comp.gpa;
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
-    const inst = dwarf.getDeclInst(instance_val) orelse {
-        const cpi = try dwarf.getConst(pt, .fromInterned(instance_val));
-        return Const.get(cpi, dwarf).debug_info_ni.unwrap().?;
-    };
     const decl_gop = try dwarf.decls.getOrPut(gpa, inst);
     if (!decl_gop.found_existing) decl_gop.value_ptr.* = .{
         .debug_info_ni = .none,
     };
     const di: Decl.Index = @fromBackingInt(@intCast(decl_gop.index));
     if (decl_gop.value_ptr.debug_info_ni.unwrap()) |debug_info_ni| return debug_info_ni;
-    dwarf.pending_decl = .{ .di = di, .instance_val = instance_val };
+    dwarf.pending_decl = .{ .di = di, .instance = instance };
     const debug_info_ni = if (dwarf.lf.cast(.elf2)) |elf| debug_info_ni: {
         try elf.nodes.ensureUnusedCapacity(gpa, 1);
         try elf.dwarf_decls.putNoClobber(gpa, di, .{
@@ -1946,19 +1967,18 @@ pub fn genDebugRnglists(
     try dr_w.writeByte(DW.RLE.end_of_list);
 }
 
-pub fn updateComptimeNav(
+pub fn updateComptimeGlobal(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
-    ni: InternPool.Nav.Index,
+    global: InternPool.Nav.Index,
 ) link.Error!void {
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
-    const nav = ip.getNav(ni);
+    const nav = ip.getNav(global);
     log.debug("updateComptimeNav({f})", .{nav.fqn.fmt(ip)});
     const inst_info = nav.srcInst(ip).resolveFull(ip).?;
     const nav_val: Value = .fromInterned(nav.resolved.?.value);
-    const zf = zcu.fileByIndex(inst_info.file);
-    const decl = zf.zir.?.getDeclaration(inst_info.inst);
+    const decl = zcu.fileByIndex(inst_info.file).zir.?.getDeclaration(inst_info.inst);
     switch (decl.kind) {
         .unnamed_test, .@"test", .decltest => return,
         .@"comptime", .@"const", .@"var" => {},
@@ -1977,34 +1997,34 @@ pub fn updateComptimeNav(
         .error_set_type,
         .inferred_error_set_type,
         .spirv_type,
-        => try dwarf.genDeclType(pt, ni, &decl),
+        => try dwarf.genDeclType(pt, global, &decl),
         .struct_type => {
             const loaded_struct = ip.loadStructType(nav_val.toIntern());
-            if (ni.toOptional() == loaded_struct.name_nav)
+            if (global.toOptional() == loaded_struct.name_nav)
                 _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern())
             else
-                try dwarf.genDeclType(pt, ni, &decl);
+                try dwarf.genDeclType(pt, global, &decl);
         },
         .enum_type => {
             const loaded_enum = ip.loadEnumType(nav_val.toIntern());
-            if (ni.toOptional() == loaded_enum.name_nav)
+            if (global.toOptional() == loaded_enum.name_nav)
                 _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern())
             else
-                try dwarf.genDeclType(pt, ni, &decl);
+                try dwarf.genDeclType(pt, global, &decl);
         },
         .union_type => {
             const loaded_union = ip.loadUnionType(nav_val.toIntern());
-            if (ni.toOptional() == loaded_union.name_nav)
+            if (global.toOptional() == loaded_union.name_nav)
                 _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern())
             else
-                try dwarf.genDeclType(pt, ni, &decl);
+                try dwarf.genDeclType(pt, global, &decl);
         },
         .opaque_type => {
             const loaded_opaque = ip.loadOpaqueType(nav_val.toIntern());
-            if (ni.toOptional() == loaded_opaque.name_nav)
+            if (global.toOptional() == loaded_opaque.name_nav)
                 _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern())
             else
-                try dwarf.genDeclType(pt, ni, &decl);
+                try dwarf.genDeclType(pt, global, &decl);
         },
         .undef,
         .simple_value,
@@ -2020,9 +2040,9 @@ pub fn updateComptimeNav(
         .aggregate,
         .un,
         .bitpack,
-        => try dwarf.genDeclValue(pt, ni, &decl),
+        => try dwarf.genDeclGlobal(pt, global, &decl),
         .@"extern" => unreachable,
-        .func => |func| if (func.owner_nav == ni and func.generic_owner == .none) {
+        .func => |func| if (func.owner_nav == global and func.generic_owner == .none) {
             _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
             break :done;
         } else return,
@@ -2034,10 +2054,10 @@ pub fn updateComptimeNav(
 fn genDeclType(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
-    ni: InternPool.Nav.Index,
+    global: InternPool.Nav.Index,
     decl: *const std.zig.Zir.Inst.Declaration.Unwrapped,
 ) link.Error!void {
-    const gi = try dwarf.getGlobal(ni);
+    const gi = try dwarf.getGlobal(global);
     const debug_info_ni = gi.get(dwarf).debug_info_ni.unwrap().?;
     var di_nw: link.MappedFile.Node.Writer = undefined;
     if (dwarf.lf.cast(.elf2)) |elf| {
@@ -2045,7 +2065,7 @@ fn genDeclType(
         elf.resetNodeRelocs(debug_info_ni);
     } else unreachable;
     defer di_nw.deinit();
-    dwarf.genDeclTypeInner(pt, &di_nw, ni, decl) catch |err| switch (err) {
+    dwarf.genDeclTypeInner(pt, &di_nw, global, decl) catch |err| switch (err) {
         error.WriteFailed => return dwarf.reportWriteError(&di_nw),
         else => |e| return e,
     };
@@ -2054,30 +2074,38 @@ fn genDeclTypeInner(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
     di_nw: *link.MappedFile.Node.Writer,
-    ni: InternPool.Nav.Index,
+    global: InternPool.Nav.Index,
     decl: *const std.zig.Zir.Inst.Declaration.Unwrapped,
 ) link.EmitError!void {
-    const ip = &pt.zcu.intern_pool;
-    const nav = ip.getNav(ni);
-    const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(nav.analysis.?.namespace).owner_type);
+    const zcu = pt.zcu;
+    const ip = &zcu.intern_pool;
+    const nav = ip.getNav(global);
+    const parent_ty = ip.namespacePtr(nav.analysis.?.namespace).owner_type;
     const di_w = &di_nw.interface;
-    try dwarf.abbrevCode(di_nw, .decl_type);
-    try dwarf.secOffset(di_nw, parent_ni, 0);
-    try di_w.writeInt(u32, decl.src_line + 1, dwarf.endian);
-    try di_w.writeUleb128(decl.src_column + 1);
-    try di_w.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
-    try dwarf.strp(&dwarf.debug_str, di_nw, nav.name.toSlice(ip));
+    if (Type.fromInterned(parent_ty).getCaptures(zcu).len > 0) {
+        try dwarf.abbrevCode(di_nw, .decl_instance_type);
+        try dwarf.refType(pt, di_nw, .fromInterned(parent_ty));
+        try dwarf.secOffset(di_nw, try dwarf.getGlobalDecl(pt, global), 0);
+    } else {
+        const parent_ni = try dwarf.getConstDecl(pt, parent_ty);
+        try dwarf.abbrevCode(di_nw, .decl_type);
+        try dwarf.secOffset(di_nw, parent_ni, 0);
+        try di_w.writeInt(u32, decl.src_line + 1, dwarf.endian);
+        try di_w.writeUleb128(decl.src_column + 1);
+        try di_w.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
+        try dwarf.strp(&dwarf.debug_str, di_nw, nav.name.toSlice(ip));
+    }
     try dwarf.refConst(pt, di_nw, .fromInterned(nav.resolved.?.value));
     try dwarf.genDebugInfoPadding(di_w, di_w.unusedCapacityLen());
 }
 
-fn genDeclValue(
+fn genDeclGlobal(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
-    ni: InternPool.Nav.Index,
+    global: InternPool.Nav.Index,
     decl: *const std.zig.Zir.Inst.Declaration.Unwrapped,
 ) link.Error!void {
-    const gi = try dwarf.getGlobal(ni);
+    const gi = try dwarf.getGlobal(global);
     const debug_info_ni = gi.get(dwarf).debug_info_ni.unwrap().?;
     var di_nw: link.MappedFile.Node.Writer = undefined;
     if (dwarf.lf.cast(.elf2)) |elf| {
@@ -2085,21 +2113,21 @@ fn genDeclValue(
         elf.resetNodeRelocs(debug_info_ni);
     } else unreachable;
     defer di_nw.deinit();
-    dwarf.genDeclValueInner(pt, &di_nw, ni, decl) catch |err| switch (err) {
+    dwarf.genDeclGlobalInner(pt, &di_nw, global, decl) catch |err| switch (err) {
         error.WriteFailed => return dwarf.reportWriteError(&di_nw),
         else => |e| return e,
     };
 }
-fn genDeclValueInner(
+fn genDeclGlobalInner(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
     di_nw: *link.MappedFile.Node.Writer,
-    ni: InternPool.Nav.Index,
+    global: InternPool.Nav.Index,
     decl: *const std.zig.Zir.Inst.Declaration.Unwrapped,
 ) link.EmitError!void {
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
-    const nav = ip.getNav(ni);
+    const nav = ip.getNav(global);
     const nav_const, const nav_ty: Type, const nav_align, const nav_val: Value = resolved: {
         const resolved = nav.resolved.?;
         break :resolved .{
@@ -2110,7 +2138,7 @@ fn genDeclValueInner(
         };
     };
     const nav_class = nav_ty.classify(zcu);
-    const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(nav.analysis.?.namespace).owner_type);
+    const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(nav.analysis.?.namespace).owner_type);
     const di_w = &di_nw.interface;
     try dwarf.abbrevCode(di_nw, if (nav_const) switch (nav_class) {
         .no_possible_value, .one_possible_value => .decl_const,
@@ -2589,12 +2617,13 @@ fn updateConstInner(
                     .auto, .@"extern" => .decl_instance_empty_struct,
                     .@"packed" => .decl_instance_empty_packed_struct,
                 });
-                try dwarf.secOffset(di_nw, try dwarf.getDecl(pt, val), 0);
+                try dwarf.secOffset(di_nw, try dwarf.getConstDecl(pt, val), 0);
             } else if (loaded_struct.name_nav.unwrap()) |name_ni| {
                 const name_nav = ip.getNav(name_ni);
                 const decl = zf.zir.?.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
-                const parent_ni =
-                    try dwarf.getDecl(pt, ip.namespacePtr(name_nav.analysis.?.namespace).owner_type);
+                const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
+                    name_nav.analysis.?.namespace,
+                ).owner_type);
                 try dwarf.abbrevCode(di_nw, if (loaded_struct.field_types.len > 0)
                     switch (loaded_struct.layout) {
                         .auto, .@"extern" => .decl_struct,
@@ -2611,7 +2640,7 @@ fn updateConstInner(
                 try dwarf.strp(&dwarf.debug_str, di_nw, name_nav.name.toSlice(ip));
             } else {
                 const decl = zf.zir.?.getStructDecl(src_inst.inst);
-                const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
+                const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
                     ip.namespacePtr(loaded_struct.namespace).parent.unwrap().?,
                 ).owner_type);
                 try dwarf.abbrevCode(di_nw, if (loaded_struct.field_types.len > 0)
@@ -2721,12 +2750,13 @@ fn updateConstInner(
                     .auto, .@"extern" => .decl_instance_empty_union,
                     .@"packed" => .decl_instance_empty_packed_union,
                 });
-                try dwarf.secOffset(di_nw, try dwarf.getDecl(pt, val), 0);
+                try dwarf.secOffset(di_nw, try dwarf.getConstDecl(pt, val), 0);
             } else if (loaded_union.name_nav.unwrap()) |name_ni| {
                 const name_nav = ip.getNav(name_ni);
                 const decl = zf.zir.?.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
-                const parent_ni =
-                    try dwarf.getDecl(pt, ip.namespacePtr(name_nav.analysis.?.namespace).owner_type);
+                const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
+                    name_nav.analysis.?.namespace,
+                ).owner_type);
                 try dwarf.abbrevCode(di_nw, if (loaded_union.field_types.len > 0)
                     switch (loaded_union.layout) {
                         .auto, .@"extern" => .decl_union,
@@ -2743,7 +2773,7 @@ fn updateConstInner(
                 try dwarf.strp(&dwarf.debug_str, di_nw, name_nav.name.toSlice(ip));
             } else {
                 const decl = zf.zir.?.getUnionDecl(loaded_union.zir_index.resolve(ip).?);
-                const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
+                const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
                     ip.namespacePtr(loaded_union.namespace).parent.unwrap().?,
                 ).owner_type);
                 try dwarf.abbrevCode(di_nw, if (loaded_union.field_types.len > 0)
@@ -2853,11 +2883,11 @@ fn updateConstInner(
                             .decl_instance_enum
                         else
                             .decl_instance_empty_enum);
-                        try dwarf.secOffset(di_nw, try dwarf.getDecl(pt, val), 0);
+                        try dwarf.secOffset(di_nw, try dwarf.getConstDecl(pt, val), 0);
                     } else if (loaded_enum.name_nav.unwrap()) |name_ni| {
                         const name_nav = ip.getNav(name_ni);
                         const decl = zir.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
-                        const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
+                        const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
                             name_nav.analysis.?.namespace,
                         ).owner_type);
                         try dwarf.abbrevCode(
@@ -2871,7 +2901,7 @@ fn updateConstInner(
                         try dwarf.strp(&dwarf.debug_str, di_nw, name_nav.name.toSlice(ip));
                     } else {
                         const decl = zir.getEnumDecl(loaded_enum.zir_index.unwrap().?.resolve(ip).?);
-                        const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
+                        const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
                             ip.namespacePtr(loaded_enum.namespace).parent.unwrap().?,
                         ).owner_type);
                         try dwarf.abbrevCode(di_nw, if (loaded_enum.field_names.len > 0)
@@ -3036,8 +3066,7 @@ fn updateConstInner(
             const func_type = ip.indexToKey(func.ty).func_type;
             const nav = ip.getNav(func.owner_nav);
             const inst_info = nav.srcInst(ip).resolveFull(ip).?;
-            const zf = zcu.fileByIndex(inst_info.file);
-            const zir = &zf.zir.?;
+            const zir = &zcu.fileByIndex(inst_info.file).zir.?;
             const decl = zir.getDeclaration(inst_info.inst);
             const empty = func_type.param_types.len == 0 and !func_type.is_var_args;
             const parent_ty: Type = .fromInterned(ip.namespacePtr(nav.analysis.?.namespace).owner_type);
@@ -3268,12 +3297,12 @@ fn updateConstIncompleteInner(
                 .@"union" => .decl_instance_empty_incomplete_union,
                 .@"enum" => .decl_instance_empty_incomplete_enum,
             });
-            try dwarf.secOffset(di_nw, try dwarf.getDecl(pt, val), 0);
+            try dwarf.secOffset(di_nw, try dwarf.getConstDecl(pt, val), 0);
         } else if (maybe_name_nav.unwrap()) |name_ni| {
             const name_nav = ip.getNav(name_ni);
             const decl = zf.zir.?.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
             const parent_ni =
-                try dwarf.getDecl(pt, ip.namespacePtr(name_nav.analysis.?.namespace).owner_type);
+                try dwarf.getConstDecl(pt, ip.namespacePtr(name_nav.analysis.?.namespace).owner_type);
             try dwarf.abbrevCode(di_nw, if (captures.len > 0) switch (kind) {
                 .@"struct" => .decl_incomplete_struct,
                 .@"union" => .decl_incomplete_union,
@@ -3289,7 +3318,7 @@ fn updateConstIncompleteInner(
             try di_w.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
             try dwarf.strp(&dwarf.debug_str, di_nw, name_nav.name.toSlice(ip));
         } else {
-            const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
+            const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
                 ip.namespacePtr(namespace).parent.unwrap().?,
             ).owner_type);
             try dwarf.abbrevCode(di_nw, if (captures.len > 0) switch (kind) {
@@ -3360,10 +3389,16 @@ pub fn genDecl(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
     di_nw: *link.MappedFile.Node.Writer,
-    instance_val: InternPool.Index,
+    instance: Decl.Instance,
 ) link.Error!void {
-    log.debug("genDecl({f})", .{Value.fromInterned(instance_val).fmtValue(pt)});
-    dwarf.genDeclInner(pt, di_nw, instance_val) catch |err| switch (err) {
+    switch (instance) {
+        .none => unreachable,
+        .@"const" => |@"const"| log.debug("genDecl({f})", .{Value.fromInterned(@"const").fmtValue(pt)}),
+        .global => |global| log.debug("genDecl({f})", .{
+            pt.zcu.intern_pool.getNav(global).fqn.fmt(&pt.zcu.intern_pool),
+        }),
+    }
+    dwarf.genDeclInner(pt, di_nw, instance) catch |err| switch (err) {
         else => |e| return e,
         error.WriteFailed => return dwarf.reportWriteError(di_nw),
     };
@@ -3372,218 +3407,239 @@ fn genDeclInner(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
     di_nw: *link.MappedFile.Node.Writer,
-    instance_val: InternPool.Index,
+    instance: Decl.Instance,
 ) link.EmitError!void {
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
     const di_w = &di_nw.interface;
-    done: {
-        const kind: enum { @"struct", @"union", @"enum" }, const zf, const src_line, const src_column, const capture_names, const captures, const name, const maybe_name_nav, const namespace = container: switch (ip.indexToKey(instance_val)) {
-            else => unreachable,
-            .struct_type => {
-                const loaded_struct = ip.loadStructType(instance_val);
-                const src_inst = loaded_struct.zir_index.resolveFull(ip) orelse {
-                    try dwarf.lostTracking(di_nw);
-                    break :done;
-                };
-                const zf = zcu.fileByIndex(src_inst.file);
-                const zir = &zf.zir.?;
-                const inst = zir.instructions.get(@backingInt(src_inst.inst));
-                const src_line, const src_column, const capture_names = decl: switch (inst.tag) {
-                    else => unreachable,
-                    .struct_init, .struct_init_ref => {
-                        const decl = zir.extraData(
-                            std.zig.Zir.Inst.StructInit,
-                            inst.data.pl_node.payload_index,
-                        ).data;
-                        break :decl .{ decl.src_line, decl.src_column, &.{} };
-                    },
-                    .struct_init_anon => {
-                        const decl = zir.extraData(
-                            std.zig.Zir.Inst.StructInitAnon,
-                            inst.data.pl_node.payload_index,
-                        ).data;
-                        break :decl .{ decl.src_line, decl.src_column, &.{} };
-                    },
-                    .extended => switch (inst.data.extended.opcode) {
+    done: switch (instance) {
+        .none => unreachable,
+        .@"const" => |@"const"| {
+            const kind: enum { @"struct", @"union", @"enum" }, const zf, const src_line, const src_column, const capture_names, const captures, const name, const maybe_name_nav, const namespace = container: switch (ip.indexToKey(instance.@"const")) {
+                else => unreachable,
+                .struct_type => {
+                    const loaded_struct = ip.loadStructType(@"const");
+                    const src_inst = loaded_struct.zir_index.resolveFull(ip) orelse {
+                        try dwarf.lostTracking(di_nw);
+                        break :done;
+                    };
+                    const zf = zcu.fileByIndex(src_inst.file);
+                    const zir = &zf.zir.?;
+                    const inst = zir.instructions.get(@backingInt(src_inst.inst));
+                    const src_line, const src_column, const capture_names = decl: switch (inst.tag) {
                         else => unreachable,
-                        .struct_decl => {
-                            const decl = zir.getStructDecl(src_inst.inst);
-                            break :decl .{ decl.src_line, decl.src_column, decl.capture_names };
-                        },
-                        .reify_struct => {
+                        .struct_init, .struct_init_ref => {
                             const decl = zir.extraData(
-                                std.zig.Zir.Inst.ReifyStruct,
-                                inst.data.extended.operand,
+                                std.zig.Zir.Inst.StructInit,
+                                inst.data.pl_node.payload_index,
                             ).data;
                             break :decl .{ decl.src_line, decl.src_column, &.{} };
                         },
-                    },
-                };
-                break :container .{
-                    .@"struct",
-                    zf,
-                    src_line,
-                    src_column,
-                    capture_names,
-                    loaded_struct.captures,
-                    loaded_struct.name,
-                    loaded_struct.name_nav,
-                    loaded_struct.namespace,
-                };
-            },
-            .union_type => {
-                const loaded_union = ip.loadUnionType(instance_val);
-                const src_inst = loaded_union.zir_index.resolveFull(ip) orelse {
-                    try dwarf.lostTracking(di_nw);
-                    break :done;
-                };
-                const zf = zcu.fileByIndex(src_inst.file);
-                const zir = &zf.zir.?;
-                const inst = zir.instructions.get(@backingInt(src_inst.inst));
-                const src_line, const src_column, const capture_names = decl: switch (inst.tag) {
-                    else => unreachable,
-                    .extended => switch (inst.data.extended.opcode) {
-                        else => unreachable,
-                        .union_decl => {
-                            const decl = zir.getUnionDecl(src_inst.inst);
-                            break :decl .{ decl.src_line, decl.src_column, decl.capture_names };
-                        },
-                        .reify_union => {
+                        .struct_init_anon => {
                             const decl = zir.extraData(
-                                std.zig.Zir.Inst.ReifyUnion,
-                                inst.data.extended.operand,
+                                std.zig.Zir.Inst.StructInitAnon,
+                                inst.data.pl_node.payload_index,
                             ).data;
                             break :decl .{ decl.src_line, decl.src_column, &.{} };
                         },
-                    },
-                };
-                break :container .{
-                    .@"union",
-                    zf,
-                    src_line,
-                    src_column,
-                    capture_names,
-                    loaded_union.captures,
-                    loaded_union.name,
-                    loaded_union.name_nav,
-                    loaded_union.namespace,
-                };
-            },
-            .enum_type => {
-                const loaded_enum = ip.loadEnumType(instance_val);
-                const src_inst = loaded_enum.zir_index.unwrap().?.resolveFull(ip) orelse {
-                    try dwarf.lostTracking(di_nw);
-                    break :done;
-                };
-                const zf = zcu.fileByIndex(src_inst.file);
-                const zir = &zf.zir.?;
-                const inst = zir.instructions.get(@backingInt(src_inst.inst));
-                const src_line, const src_column, const capture_names = decl: switch (inst.tag) {
-                    else => unreachable,
-                    .extended => switch (inst.data.extended.opcode) {
+                        .extended => switch (inst.data.extended.opcode) {
+                            else => unreachable,
+                            .struct_decl => {
+                                const decl = zir.getStructDecl(src_inst.inst);
+                                break :decl .{ decl.src_line, decl.src_column, decl.capture_names };
+                            },
+                            .reify_struct => {
+                                const decl = zir.extraData(
+                                    std.zig.Zir.Inst.ReifyStruct,
+                                    inst.data.extended.operand,
+                                ).data;
+                                break :decl .{ decl.src_line, decl.src_column, &.{} };
+                            },
+                        },
+                    };
+                    break :container .{
+                        .@"struct",
+                        zf,
+                        src_line,
+                        src_column,
+                        capture_names,
+                        loaded_struct.captures,
+                        loaded_struct.name,
+                        loaded_struct.name_nav,
+                        loaded_struct.namespace,
+                    };
+                },
+                .union_type => {
+                    const loaded_union = ip.loadUnionType(@"const");
+                    const src_inst = loaded_union.zir_index.resolveFull(ip) orelse {
+                        try dwarf.lostTracking(di_nw);
+                        break :done;
+                    };
+                    const zf = zcu.fileByIndex(src_inst.file);
+                    const zir = &zf.zir.?;
+                    const inst = zir.instructions.get(@backingInt(src_inst.inst));
+                    const src_line, const src_column, const capture_names = decl: switch (inst.tag) {
                         else => unreachable,
-                        .enum_decl => {
-                            const decl = zir.getEnumDecl(src_inst.inst);
-                            break :decl .{ decl.src_line, decl.src_column, decl.capture_names };
+                        .extended => switch (inst.data.extended.opcode) {
+                            else => unreachable,
+                            .union_decl => {
+                                const decl = zir.getUnionDecl(src_inst.inst);
+                                break :decl .{ decl.src_line, decl.src_column, decl.capture_names };
+                            },
+                            .reify_union => {
+                                const decl = zir.extraData(
+                                    std.zig.Zir.Inst.ReifyUnion,
+                                    inst.data.extended.operand,
+                                ).data;
+                                break :decl .{ decl.src_line, decl.src_column, &.{} };
+                            },
                         },
-                        .reify_enum => {
-                            const decl = zir.extraData(
-                                std.zig.Zir.Inst.ReifyEnum,
-                                inst.data.extended.operand,
-                            ).data;
-                            break :decl .{ decl.src_line, decl.src_column, &.{} };
+                    };
+                    break :container .{
+                        .@"union",
+                        zf,
+                        src_line,
+                        src_column,
+                        capture_names,
+                        loaded_union.captures,
+                        loaded_union.name,
+                        loaded_union.name_nav,
+                        loaded_union.namespace,
+                    };
+                },
+                .enum_type => {
+                    const loaded_enum = ip.loadEnumType(@"const");
+                    const src_inst = loaded_enum.zir_index.unwrap().?.resolveFull(ip) orelse {
+                        try dwarf.lostTracking(di_nw);
+                        break :done;
+                    };
+                    const zf = zcu.fileByIndex(src_inst.file);
+                    const zir = &zf.zir.?;
+                    const inst = zir.instructions.get(@backingInt(src_inst.inst));
+                    const src_line, const src_column, const capture_names = decl: switch (inst.tag) {
+                        else => unreachable,
+                        .extended => switch (inst.data.extended.opcode) {
+                            else => unreachable,
+                            .enum_decl => {
+                                const decl = zir.getEnumDecl(src_inst.inst);
+                                break :decl .{ decl.src_line, decl.src_column, decl.capture_names };
+                            },
+                            .reify_enum => {
+                                const decl = zir.extraData(
+                                    std.zig.Zir.Inst.ReifyEnum,
+                                    inst.data.extended.operand,
+                                ).data;
+                                break :decl .{ decl.src_line, decl.src_column, &.{} };
+                            },
                         },
+                    };
+                    break :container .{
+                        .@"enum",
+                        zf,
+                        src_line,
+                        src_column,
+                        capture_names,
+                        loaded_enum.captures,
+                        loaded_enum.name,
+                        loaded_enum.name_nav,
+                        loaded_enum.namespace,
+                    };
+                },
+                .opaque_type => {
+                    const loaded_opaque = ip.loadOpaqueType(@"const");
+                    const src_inst = loaded_opaque.zir_index.resolveFull(ip) orelse {
+                        try dwarf.lostTracking(di_nw);
+                        break :done;
+                    };
+                    const zf = zcu.fileByIndex(src_inst.file);
+                    const decl = zf.zir.?.getOpaqueDecl(src_inst.inst);
+                    break :container .{
+                        .@"struct",
+                        zf,
+                        decl.src_line,
+                        decl.src_column,
+                        decl.capture_names,
+                        loaded_opaque.captures,
+                        loaded_opaque.name,
+                        loaded_opaque.name_nav,
+                        loaded_opaque.namespace,
+                    };
+                },
+            };
+            const zir = &zf.zir.?;
+            if (maybe_name_nav.unwrap()) |name_ni| {
+                const name_nav = ip.getNav(name_ni);
+                const decl = zir.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
+                const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
+                    name_nav.analysis.?.namespace,
+                ).owner_type);
+                try dwarf.abbrevCode(di_nw, if (captures.len > 0) switch (kind) {
+                    .@"struct" => .decl_specification_struct,
+                    .@"union" => .decl_specification_union,
+                    .@"enum" => .decl_specification_enum,
+                } else switch (kind) {
+                    .@"struct" => .decl_specification_empty_struct,
+                    .@"union" => .decl_specification_empty_union,
+                    .@"enum" => .decl_specification_empty_enum,
+                });
+                try dwarf.secOffset(di_nw, parent_ni, 0);
+                try di_w.writeInt(u32, decl.src_line + 1, dwarf.endian);
+                try di_w.writeUleb128(decl.src_column + 1);
+                try di_w.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
+                try dwarf.strp(&dwarf.debug_str, di_nw, name.toSlice(ip));
+            } else {
+                const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
+                    ip.namespacePtr(namespace).parent.unwrap().?,
+                ).owner_type);
+                try dwarf.abbrevCode(di_nw, if (captures.len > 0) switch (kind) {
+                    .@"struct" => .type_decl_specification_struct,
+                    .@"union" => .type_decl_specification_union,
+                    .@"enum" => .type_decl_specification_enum,
+                } else switch (kind) {
+                    .@"struct" => .type_decl_specification_empty_struct,
+                    .@"union" => .type_decl_specification_empty_union,
+                    .@"enum" => .type_decl_specification_empty_enum,
+                });
+                try dwarf.secOffset(di_nw, parent_ni, 0);
+                try di_w.writeInt(u32, src_line + 1, dwarf.endian);
+                try di_w.writeUleb128(src_column + 1);
+                try dwarf.strp(&dwarf.debug_str, di_nw, name.toSlice(ip));
+            }
+            for (capture_names, captures.get(ip)) |capture_name, capture| {
+                try dwarf.abbrevCode(di_nw, .capture_specification);
+                switch (capture.unwrap()) {
+                    .@"comptime", .runtime, .nav_val => try dwarf.strp(
+                        &dwarf.debug_str,
+                        di_nw,
+                        zir.nullTerminatedString(capture_name),
+                    ),
+                    .nav_ref => {
+                        const capture_name_slice =
+                            try zcu.gpa.print("&{s}", .{zir.nullTerminatedString(capture_name)});
+                        defer zcu.gpa.free(capture_name_slice);
+                        try dwarf.strp(&dwarf.debug_str, di_nw, capture_name_slice);
                     },
-                };
-                break :container .{
-                    .@"enum",
-                    zf,
-                    src_line,
-                    src_column,
-                    capture_names,
-                    loaded_enum.captures,
-                    loaded_enum.name,
-                    loaded_enum.name_nav,
-                    loaded_enum.namespace,
-                };
-            },
-            .opaque_type => {
-                const loaded_opaque = ip.loadOpaqueType(instance_val);
-                const src_inst = loaded_opaque.zir_index.resolveFull(ip) orelse {
-                    try dwarf.lostTracking(di_nw);
-                    break :done;
-                };
-                const zf = zcu.fileByIndex(src_inst.file);
-                const decl = zf.zir.?.getOpaqueDecl(src_inst.inst);
-                break :container .{
-                    .@"struct",
-                    zf,
-                    decl.src_line,
-                    decl.src_column,
-                    decl.capture_names,
-                    loaded_opaque.captures,
-                    loaded_opaque.name,
-                    loaded_opaque.name_nav,
-                    loaded_opaque.namespace,
-                };
-            },
-        };
-        const zir = &zf.zir.?;
-        if (maybe_name_nav.unwrap()) |name_ni| {
-            const name_nav = ip.getNav(name_ni);
-            const decl = zir.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
-            const parent_ni =
-                try dwarf.getDecl(pt, ip.namespacePtr(name_nav.analysis.?.namespace).owner_type);
-            try dwarf.abbrevCode(di_nw, if (captures.len > 0) switch (kind) {
-                .@"struct" => .decl_specification_struct,
-                .@"union" => .decl_specification_union,
-                .@"enum" => .decl_specification_enum,
-            } else switch (kind) {
-                .@"struct" => .decl_specification_empty_struct,
-                .@"union" => .decl_specification_empty_union,
-                .@"enum" => .decl_specification_empty_enum,
-            });
+                }
+            }
+            if (captures.len > 0) try di_w.writeUleb128(@backingInt(AbbrevCode.null));
+        },
+        .global => |global| {
+            const nav = ip.getNav(global);
+            const src_inst = nav.srcInst(ip).resolveFull(ip).?;
+            const decl = zcu.fileByIndex(src_inst.file).zir.?.getDeclaration(src_inst.inst);
+            const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
+                nav.analysis.?.namespace,
+            ).owner_type);
+            try dwarf.abbrevCode(di_nw, if (nav.resolved.?.@"const") switch (nav.resolved.?.type) {
+                .type_type => .decl_specification_type,
+                else => .decl_specification_const,
+            } else .decl_specification_var);
             try dwarf.secOffset(di_nw, parent_ni, 0);
             try di_w.writeInt(u32, decl.src_line + 1, dwarf.endian);
             try di_w.writeUleb128(decl.src_column + 1);
             try di_w.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
-            try dwarf.strp(&dwarf.debug_str, di_nw, name.toSlice(ip));
-        } else {
-            const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
-                ip.namespacePtr(namespace).parent.unwrap().?,
-            ).owner_type);
-            try dwarf.abbrevCode(di_nw, if (captures.len > 0) switch (kind) {
-                .@"struct" => .type_decl_specification_struct,
-                .@"union" => .type_decl_specification_union,
-                .@"enum" => .type_decl_specification_enum,
-            } else switch (kind) {
-                .@"struct" => .type_decl_specification_empty_struct,
-                .@"union" => .type_decl_specification_empty_union,
-                .@"enum" => .type_decl_specification_empty_enum,
-            });
-            try dwarf.secOffset(di_nw, parent_ni, 0);
-            try di_w.writeInt(u32, src_line + 1, dwarf.endian);
-            try di_w.writeUleb128(src_column + 1);
-            try dwarf.strp(&dwarf.debug_str, di_nw, name.toSlice(ip));
-        }
-        for (capture_names, captures.get(ip)) |capture_name, capture| {
-            try dwarf.abbrevCode(di_nw, .capture_specification);
-            switch (capture.unwrap()) {
-                .@"comptime", .runtime, .nav_val => try dwarf.strp(
-                    &dwarf.debug_str,
-                    di_nw,
-                    zir.nullTerminatedString(capture_name),
-                ),
-                .nav_ref => {
-                    const capture_name_slice =
-                        try zcu.gpa.print("&{s}", .{zir.nullTerminatedString(capture_name)});
-                    defer zcu.gpa.free(capture_name_slice);
-                    try dwarf.strp(&dwarf.debug_str, di_nw, capture_name_slice);
-                },
-            }
-        }
-        if (captures.len > 0) try di_w.writeUleb128(@backingInt(AbbrevCode.null));
+            try dwarf.strp(&dwarf.debug_str, di_nw, nav.name.toSlice(ip));
+        },
     }
     try dwarf.genDebugInfoPadding(di_w, di_w.unusedCapacityLen());
 }
@@ -3887,7 +3943,6 @@ pub const AbbrevCode = enum {
     pad_n,
     // decl, specification, and instance codes are assumed to all have the same uleb128 size
     decl_lost,
-    decl_type,
     decl_empty_incomplete_enum,
     decl_incomplete_enum,
     decl_empty_enum,
@@ -3920,11 +3975,12 @@ pub const AbbrevCode = enum {
     decl_packed_union,
     type_decl_empty_packed_union,
     type_decl_packed_union,
-    decl_var,
+    decl_type,
     decl_const,
     decl_const_fully_runtime,
     decl_const_partially_comptime,
     decl_const_fully_comptime,
+    decl_var,
     decl_empty_func,
     decl_func,
     decl_empty_func_generic,
@@ -3943,6 +3999,9 @@ pub const AbbrevCode = enum {
     decl_specification_union,
     type_decl_specification_empty_union,
     type_decl_specification_union,
+    decl_specification_type,
+    decl_specification_const,
+    decl_specification_var,
     decl_specification_func,
     decl_instance_type,
     decl_instance_empty_incomplete_enum,
@@ -4063,7 +4122,7 @@ pub const AbbrevCode = enum {
     comptime {
         assert(uleb128Size(@backingInt(AbbrevCode.pad_1)) == 1);
         assert(uleb128Size(@backingInt(AbbrevCode.pad_n)) == 1);
-        assert(uleb128Size(@backingInt(AbbrevCode.decl_type)) == decl_size);
+        assert(uleb128Size(@backingInt(AbbrevCode.decl_lost)) == decl_size);
     }
 
     const Attr = struct {
@@ -4110,12 +4169,6 @@ pub const AbbrevCode = enum {
         },
         .decl_lost = .{
             .tag = .ZIG_lost_declaration,
-        },
-        .decl_type = .{
-            .tag = .imported_declaration,
-            .attrs = decl_attrs ++ .{
-                .{ .import, .ref_addr },
-            },
         },
         .decl_empty_incomplete_enum = .{
             .tag = .enumeration_type,
@@ -4309,6 +4362,12 @@ pub const AbbrevCode = enum {
                 .{ .type, .ref_addr },
             },
         },
+        .decl_type = .{
+            .tag = .imported_declaration,
+            .attrs = decl_attrs ++ .{
+                .{ .import, .ref_addr },
+            },
+        },
         .decl_var = .{
             .tag = .variable,
             .attrs = decl_attrs ++ .{
@@ -4472,13 +4531,27 @@ pub const AbbrevCode = enum {
             .children = true,
             .attrs = type_decl_specification_attrs,
         },
+        .decl_specification_type = .{
+            .tag = .imported_declaration,
+            .attrs = decl_specification_attrs,
+        },
+        .decl_specification_const = .{
+            .tag = .constant,
+            .attrs = decl_specification_attrs,
+        },
+        .decl_specification_var = .{
+            .tag = .variable,
+            .attrs = decl_specification_attrs,
+        },
         .decl_specification_func = .{
             .tag = .subprogram,
             .attrs = decl_specification_attrs,
         },
         .decl_instance_type = .{
             .tag = .imported_declaration,
-            .attrs = decl_instance_attrs ++ .{
+            .attrs = .{
+                .{ .ZIG_parent, .ref_addr },
+            } ++ decl_instance_attrs ++ .{
                 .{ .import, .ref_addr },
             },
         },

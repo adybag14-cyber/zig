@@ -8663,7 +8663,7 @@ fn updateNavInner(elf: *Elf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index)
     } else {
         if (elf.ehdrMachine() != .X86_64) return;
         const mod = zcu.fileByIndex(nav.srcInst(ip).resolveFile(ip)).mod.?;
-        if (!mod.strip) try elf.dwarf.updateComptimeNav(pt, nav_index);
+        if (!mod.strip) try elf.dwarf.updateComptimeGlobal(pt, nav_index);
     }
 
     // The NAV's node is done---now generate any UAVs or lazy code/data which the NAV needs.
@@ -9446,15 +9446,15 @@ fn genPending(elf: *Elf, pt: Zcu.PerThread) link.Error!void {
             const gpa = elf.base.comp.gpa;
             while (true) {
                 const pending = elf.dwarf.pending_decl;
-                if (pending.instance_val == .none) break;
-                elf.dwarf.pending_decl = .{ .di = undefined, .instance_val = .none };
+                if (pending.instance == .none) break;
+                elf.dwarf.pending_decl = .{ .di = undefined, .instance = .none };
                 const debug_info_ni = pending.di.get(&elf.dwarf).debug_info_ni.unwrap().?;
                 try debug_info_ni.moved(gpa, &elf.mf);
                 var di_nw: MappedFile.Node.Writer = undefined;
                 debug_info_ni.writer(gpa, &elf.mf, &di_nw);
                 defer di_nw.deinit();
                 elf.resetNodeRelocs(debug_info_ni);
-                try elf.dwarf.genDecl(pt, &di_nw, pending.instance_val);
+                try elf.dwarf.genDecl(pt, &di_nw, pending.instance);
             }
         },
         .code_view => unreachable,
