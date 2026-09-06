@@ -811,6 +811,23 @@ pub const HWCAP = switch (native_arch) {
         pub const SCQ = 1 << 15;
         pub const LAM_BH = 1 << 16;
     },
+    .mips, .mipsel, .mips64, .mips64el => struct {
+        pub const R6 = 1 << 0;
+        pub const MSA = 1 << 1;
+        pub const CRC32 = 1 << 2;
+        pub const MIPS16 = 1 << 3;
+        pub const MDMX = 1 << 4;
+        pub const MIPS3D = 1 << 5;
+        pub const SMARTMIPS = 1 << 6;
+        pub const DSP = 1 << 7;
+        pub const DSP2 = 1 << 8;
+        pub const DSP3 = 1 << 9;
+        pub const MIPS16E2 = 1 << 10;
+        pub const LOONGSON_MMI = 1 << 11;
+        pub const LOONGSON_EXT = 1 << 12;
+        pub const LOONGSON_EXT2 = 1 << 13;
+        pub const LOONGSON_CPUCFG = 1 << 14;
+    },
     else => struct {},
 };
 
