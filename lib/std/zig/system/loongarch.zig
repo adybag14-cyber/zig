@@ -52,9 +52,9 @@ pub fn detectNativeCpuAndFeatures(
     if (builtin.os.tag == .linux) {
         const HWCAP = std.os.linux.HWCAP;
         const hwcap_bits: usize = if (builtin.link_libc)
-            std.c.getauxval(std.elf.AT_HWCAP)
+            std.c.getauxval(std.elf.AT.HWCAP)
         else
-            std.os.linux.getauxval(std.elf.AT_HWCAP);
+            std.os.linux.getauxval(std.elf.AT.HWCAP);
 
         setFeature(&cpu, .ual, (hwcap_bits & HWCAP.UAL) != 0);
 
