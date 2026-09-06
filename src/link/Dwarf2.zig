@@ -3037,7 +3037,21 @@ fn updateConstInner(
             });
         },
 
-        else => return,
+        .undef => |ty| {
+            try dwarf.abbrevCode(di_nw, .undefined_comptime_value);
+            try dwarf.refType(pt, di_nw, .fromInterned(ty));
+        },
+        .simple_value => |simple_value| switch (simple_value) {
+            .void => unreachable, // opv state
+            .true, .false => unreachable, // runtime bits
+            .@"unreachable" => unreachable, // not a value
+            .null => {
+                // TODO: proper representation for this
+                try dwarf.abbrevCode(di_nw, .undefined_comptime_value);
+                try dwarf.refType(pt, di_nw, .null);
+            },
+        },
+        .@"extern" => unreachable,
         .func => |func| {
             const func_type = ip.indexToKey(func.ty).func_type;
             const nav = ip.getNav(func.owner_nav);
@@ -3069,17 +3083,424 @@ fn updateConstInner(
             if (func_type.is_var_args) try dwarf.abbrevCode(di_nw, .is_var_args);
             if (!empty) try di_w.writeUleb128(@backingInt(AbbrevCode.null));
         },
+        .int => |int| {
+            var big_int_space: Value.BigIntSpace = undefined;
+            try dwarf.abbrevCode(di_nw, .comptime_value);
+            try dwarf.refType(pt, di_nw, .fromInterned(int.ty));
+            try dwarf.bigIntConstValue(
+                di_w,
+                .fromInterned(int.ty),
+                Value.fromInterned(val).toBigInt(&big_int_space, zcu),
+            );
+        },
+        .bitpack => |bitpack| {
+            var big_int_space: Value.BigIntSpace = undefined;
+            const backing_int_val: Value = .fromInterned(bitpack.backing_int_val);
+            try dwarf.abbrevCode(di_nw, .comptime_value);
+            try dwarf.refType(pt, di_nw, .fromInterned(bitpack.ty));
+            try dwarf.bigIntConstValue(
+                di_w,
+                backing_int_val.typeOf(zcu),
+                backing_int_val.toBigInt(&big_int_space, zcu),
+            );
+        },
+        .err => |err| {
+            try dwarf.abbrevCode(di_nw, .comptime_value);
+            try dwarf.refType(pt, di_nw, .fromInterned(err.ty));
+            try di_w.writeUleb128(DW.FORM.udata);
+            try di_w.writeUleb128(try pt.getErrorValue(err.name));
+        },
+        .error_union => |error_union| {
+            try dwarf.abbrevCode(di_nw, .aggregate_undefined_comptime_value);
+            try dwarf.refType(pt, di_nw, .fromInterned(error_union.ty));
+            var err_buf: [4]u8 = undefined;
+            const err_bytes = err_buf[0..@divCeil(zcu.errorSetBits(), 8)];
+            const err_val = switch (error_union.val) {
+                .err_name => |err_name| try pt.getErrorValue(err_name),
+                .payload => 0,
+            };
+            switch (err_bytes.len) {
+                else => unreachable,
+                inline 0...4 => |len| std.mem.writeInt(
+                    @Int(.unsigned, 8 * len),
+                    err_bytes[0..len],
+                    @intCast(err_val),
+                    dwarf.endian,
+                ),
+            }
+            {
+                try dwarf.abbrevCode(di_nw, .comptime_value_field_runtime);
+                try dwarf.strp(&dwarf.debug_str, di_nw, "is_error");
+                try di_w.writeUleb128(err_bytes.len);
+                try di_w.writeAll(err_bytes);
+            }
+            payload_field: switch (error_union.val) {
+                .err_name => {},
+                .payload => |payload_val| {
+                    const payload_ty: Type = .fromInterned(ip.typeOf(payload_val));
+                    const payload_class = payload_ty.classify(zcu);
+                    try dwarf.abbrevCode(di_nw, if (payload_class.comptimeOnly())
+                        .comptime_value_field_comptime
+                    else if (payload_class.hasRuntimeBits())
+                        .comptime_value_field_runtime
+                    else
+                        break :payload_field);
+                    try dwarf.strp(&dwarf.debug_str, di_nw, "value");
+                    if (payload_class.comptimeOnly())
+                        try dwarf.refConst(pt, di_nw, .fromInterned(payload_val))
+                    else if (payload_class.hasRuntimeBits())
+                        try dwarf.blockConst(pt, di_nw, .fromInterned(payload_val))
+                    else
+                        unreachable;
+                },
+            }
+            {
+                try dwarf.abbrevCode(di_nw, .comptime_value_field_runtime);
+                try dwarf.strp(&dwarf.debug_str, di_nw, "error");
+                try di_w.writeUleb128(err_bytes.len);
+                try di_w.writeAll(err_bytes);
+            }
+            try di_w.writeUleb128(@backingInt(AbbrevCode.null));
+        },
+        .enum_literal => |enum_literal| {
+            try dwarf.abbrevCode(di_nw, .comptime_value);
+            try dwarf.refType(pt, di_nw, .enum_literal);
+            try di_w.writeUleb128(DW.FORM.strp);
+            try dwarf.strp(&dwarf.debug_str, di_nw, enum_literal.toSlice(ip));
+        },
+        .enum_tag => |enum_tag| {
+            var big_int_space: Value.BigIntSpace = undefined;
+            const int = ip.indexToKey(enum_tag.int).int;
+            try dwarf.abbrevCode(di_nw, .comptime_value);
+            try dwarf.refType(pt, di_nw, .fromInterned(enum_tag.ty));
+            try dwarf.bigIntConstValue(
+                di_w,
+                .fromInterned(int.ty),
+                Value.fromInterned(val).toBigInt(&big_int_space, zcu),
+            );
+        },
+        .float => |float| {
+            try dwarf.abbrevCode(di_nw, .comptime_value);
+            try dwarf.refType(pt, di_nw, .fromInterned(float.ty));
+            switch (float.storage) {
+                .f16 => |f16_val| {
+                    try di_w.writeUleb128(DW.FORM.data2);
+                    try di_w.writeInt(u16, @bitCast(f16_val), dwarf.endian);
+                },
+                .f32 => |f32_val| {
+                    try di_w.writeUleb128(DW.FORM.data4);
+                    try di_w.writeInt(u32, @bitCast(f32_val), dwarf.endian);
+                },
+                .f64 => |f64_val| {
+                    try di_w.writeUleb128(DW.FORM.data8);
+                    try di_w.writeInt(u64, @bitCast(f64_val), dwarf.endian);
+                },
+                .f80 => |f80_val| {
+                    try di_w.writeUleb128(DW.FORM.block);
+                    try di_w.writeUleb128(@divExact(80, 8));
+                    try di_w.writeInt(u80, @bitCast(f80_val), dwarf.endian);
+                },
+                .f128 => |f128_val| {
+                    try di_w.writeUleb128(DW.FORM.data16);
+                    try di_w.writeInt(u128, @bitCast(f128_val), dwarf.endian);
+                },
+            }
+        },
+        .ptr => |ptr| {
+            const Access = union(enum) {
+                index: u64,
+                field: InternPool.NullTerminatedString,
+                synthetic_field: []const u8,
+                tuple_index: u32,
+            };
+            var zero_bit_accesses: std.ArrayList(Access) = .empty;
+            defer zero_bit_accesses.deinit(zcu.gpa);
+            location: {
+                var base_addr = ptr.base_addr;
+                var byte_offset = ptr.byte_offset;
+                const base_ni = while (true) {
+                    const base_ptr, const access: Access = base_ptr_access: switch (base_addr) {
+                        .nav => |ni| break (try dwarf.getGlobal(ni)).get(dwarf).debug_info_ni,
+                        .comptime_alloc, .comptime_field => unreachable,
+                        .uav => |uav| {
+                            const uav_ty: Type = .fromInterned(ip.typeOf(uav.val));
+                            if (uav_ty.classify(zcu) == .one_possible_value) {
+                                try dwarf.abbrevCode(di_nw, if (zero_bit_accesses.items.len > 0)
+                                    .aggregate_comptime_value
+                                else
+                                    .comptime_value);
+                                try dwarf.refType(pt, di_nw, .fromInterned(ptr.ty));
+                                try di_w.writeUleb128(DW.FORM.udata);
+                                try di_w.writeUleb128(ip.indexToKey(uav.orig_ty)
+                                    .ptr_type.flags.alignment.toByteUnits() orelse
+                                    uav_ty.abiAlignment(zcu).toByteUnits().?);
+                                break :location;
+                            } else break Const.get(try dwarf.getConst(pt, .fromInterned(
+                                uav.val,
+                            )), dwarf).debug_info_ni;
+                        },
+                        .int => {
+                            try dwarf.abbrevCode(di_nw, if (zero_bit_accesses.items.len > 0)
+                                .aggregate_comptime_value
+                            else
+                                .comptime_value);
+                            try dwarf.refType(pt, di_nw, .fromInterned(ptr.ty));
+                            try di_w.writeUleb128(DW.FORM.udata);
+                            try di_w.writeUleb128(byte_offset);
+                            break :location;
+                        },
+                        .eu_payload => |eu_ptr| {
+                            const base_ptr = ip.indexToKey(eu_ptr).ptr;
+                            byte_offset += codegen.errUnionPayloadOffset(.fromInterned(ip.indexToKey(
+                                ip.indexToKey(base_ptr.ty).ptr_type.child,
+                            ).error_union_type.payload_type), zcu);
+                            break :base_ptr_access .{ base_ptr, .{ .synthetic_field = "value" } };
+                        },
+                        .opt_payload => |opt_ptr| .{ ip.indexToKey(opt_ptr).ptr, .{
+                            .synthetic_field = "?",
+                        } },
+                        .field => |field| {
+                            const base_ptr = ip.indexToKey(field.base).ptr;
+                            const agg_ty: Type =
+                                .fromInterned(ip.indexToKey(base_ptr.ty).ptr_type.child);
+                            break :base_ptr_access .{
+                                base_ptr,
+                                if (agg_ty.isSlice(zcu)) .{ .synthetic_field = switch (field.index) {
+                                    Value.slice_ptr_index => "ptr",
+                                    Value.slice_len_index => "len",
+                                    else => unreachable,
+                                } } else if (agg_ty.structFieldName(
+                                    @intCast(field.index),
+                                    zcu,
+                                ).unwrap()) |field_name|
+                                    .{ .field = field_name }
+                                else
+                                    .{ .tuple_index = @intCast(field.index) },
+                            };
+                        },
+                        .arr_elem => |arr_elem| .{
+                            ip.indexToKey(arr_elem.base).ptr,
+                            .{ .index = arr_elem.index },
+                        },
+                    };
+                    base_addr = base_ptr.base_addr;
+                    byte_offset += base_ptr.byte_offset;
+                    if (Type.fromInterned(
+                        ip.indexToKey(base_ptr.ty).ptr_type.child,
+                    ).hasRuntimeBits(zcu))
+                        assert(access != .index)
+                    else
+                        try zero_bit_accesses.append(zcu.gpa, access);
+                };
+                try dwarf.abbrevCode(di_nw, if (zero_bit_accesses.items.len > 0)
+                    .aggregate_location_comptime_value
+                else
+                    .location_comptime_value);
+                try dwarf.refType(pt, di_nw, .fromInterned(ptr.ty));
+                try dwarf.exprLoc(di_nw, .{ .implicit_pointer = .{
+                    .node = base_ni.unwrap().?,
+                    .offset = byte_offset,
+                } });
+            }
+            if (zero_bit_accesses.items.len > 0) {
+                for (zero_bit_accesses.items) |access| switch (access) {
+                    .index => |index| {
+                        try dwarf.abbrevCode(di_nw, .array_index);
+                        try di_w.writeUleb128(index);
+                    },
+                    .field => |field| {
+                        try dwarf.abbrevCode(di_nw, .access);
+                        try dwarf.strp(&dwarf.debug_str, di_nw, field.toSlice(ip));
+                    },
+                    .synthetic_field => |field| {
+                        try dwarf.abbrevCode(di_nw, .access);
+                        try dwarf.strp(&dwarf.debug_str, di_nw, field);
+                    },
+                    .tuple_index => |index| {
+                        try dwarf.abbrevCode(di_nw, .access);
+                        var field_name_buf: [std.fmt.count("{d}", .{std.math.maxInt(u32)})]u8 =
+                            undefined;
+                        const field_name = std.mem.print(&field_name_buf, "{d}", .{index}) catch
+                            unreachable;
+                        try dwarf.strp(&dwarf.debug_str, di_nw, field_name);
+                    },
+                };
+                try di_w.writeUleb128(@backingInt(AbbrevCode.null));
+            }
+        },
+        .slice => |slice| {
+            try dwarf.abbrevCode(di_nw, .aggregate_undefined_comptime_value);
+            try dwarf.refType(pt, di_nw, .fromInterned(slice.ty));
+            {
+                try dwarf.abbrevCode(di_nw, .comptime_value_field_comptime);
+                try dwarf.strp(&dwarf.debug_str, di_nw, "ptr");
+                try dwarf.refConst(pt, di_nw, .fromInterned(slice.ptr));
+            }
+            {
+                try dwarf.abbrevCode(di_nw, .comptime_value_field_runtime);
+                try dwarf.strp(&dwarf.debug_str, di_nw, "len");
+                try dwarf.blockConst(pt, di_nw, .fromInterned(slice.len));
+            }
+            try di_w.writeUleb128(@backingInt(AbbrevCode.null));
+        },
+        .opt => |opt| {
+            const opt_child_ty: Type = .fromInterned(ip.indexToKey(opt.ty).opt_type);
+            try dwarf.abbrevCode(di_nw, .aggregate_undefined_comptime_value);
+            try dwarf.refType(pt, di_nw, .fromInterned(opt.ty));
+            {
+                try dwarf.abbrevCode(di_nw, .comptime_value_field_runtime);
+                try dwarf.strp(&dwarf.debug_str, di_nw, "has_value");
+                switch (optRepr(opt_child_ty, zcu)) {
+                    .opv_null => try di_w.writeUleb128(0),
+                    .unpacked => try dwarf.blockConst(pt, di_nw, .makeBool(opt.val != .none)),
+                    .error_set, .pointer => try dwarf.blockConst(pt, di_nw, .fromInterned(val)),
+                }
+            }
+            if (opt.val != .none) child_field: {
+                const opt_child_class = opt_child_ty.classify(zcu);
+                try dwarf.abbrevCode(di_nw, if (opt_child_class.comptimeOnly())
+                    .comptime_value_field_comptime
+                else if (opt_child_class.hasRuntimeBits())
+                    .comptime_value_field_runtime
+                else
+                    break :child_field);
+                try dwarf.strp(&dwarf.debug_str, di_nw, "?");
+                if (opt_child_class.comptimeOnly())
+                    try dwarf.refConst(pt, di_nw, .fromInterned(opt.val))
+                else if (opt_child_class.hasRuntimeBits())
+                    try dwarf.blockConst(pt, di_nw, .fromInterned(opt.val))
+                else
+                    unreachable;
+            }
+            try di_w.writeUleb128(@backingInt(AbbrevCode.null));
+        },
+        .aggregate => |aggregate| {
+            try dwarf.abbrevCode(di_nw, .aggregate_undefined_comptime_value);
+            try dwarf.refType(pt, di_nw, .fromInterned(aggregate.ty));
+            switch (ip.indexToKey(aggregate.ty)) {
+                .struct_type => {
+                    const loaded_struct = ip.loadStructType(aggregate.ty);
+                    assert(loaded_struct.layout == .auto);
+                    for (0..loaded_struct.field_types.len) |field_index| {
+                        if (loaded_struct.field_is_comptime_bits.get(ip, field_index)) continue;
+                        const field_ty: Type =
+                            .fromInterned(loaded_struct.field_types.get(ip)[field_index]);
+                        const field_class = field_ty.classify(zcu);
+                        try dwarf.abbrevCode(di_nw, if (field_class.comptimeOnly())
+                            .comptime_value_field_comptime
+                        else if (field_class.hasRuntimeBits())
+                            .comptime_value_field_runtime
+                        else
+                            continue);
+                        try dwarf.strp(
+                            &dwarf.debug_str,
+                            di_nw,
+                            loaded_struct.field_names.get(ip)[field_index].toSlice(ip),
+                        );
+                        const field_value: Value = .fromInterned(switch (aggregate.storage) {
+                            .bytes => unreachable,
+                            .elems => |elems| elems[field_index],
+                            .repeated_elem => |repeated_elem| repeated_elem,
+                        });
+                        if (field_class.comptimeOnly())
+                            try dwarf.refConst(pt, di_nw, field_value)
+                        else if (field_class.hasRuntimeBits())
+                            try dwarf.blockConst(pt, di_nw, field_value)
+                        else
+                            unreachable;
+                    }
+                },
+                .tuple_type => |tuple_type| for (0..tuple_type.types.len) |field_index| {
+                    if (tuple_type.values.get(ip)[field_index] != .none) continue;
+                    const field_ty: Type = .fromInterned(tuple_type.types.get(ip)[field_index]);
+                    const field_class = field_ty.classify(zcu);
+                    try dwarf.abbrevCode(di_nw, if (field_class.comptimeOnly())
+                        .comptime_value_field_comptime
+                    else if (field_class.hasRuntimeBits())
+                        .comptime_value_field_runtime
+                    else
+                        continue);
+                    {
+                        var field_name_buf: [std.fmt.count("{d}", .{std.math.maxInt(u32)})]u8 =
+                            undefined;
+                        const field_name = std.mem.print(&field_name_buf, "{d}", .{field_index}) catch
+                            unreachable;
+                        try dwarf.strp(&dwarf.debug_str, di_nw, field_name);
+                    }
+                    const field_value: Value = .fromInterned(switch (aggregate.storage) {
+                        .bytes => unreachable,
+                        .elems => |elems| elems[field_index],
+                        .repeated_elem => |repeated_elem| repeated_elem,
+                    });
+                    if (field_class.comptimeOnly())
+                        try dwarf.refConst(pt, di_nw, field_value)
+                    else if (field_class.hasRuntimeBits())
+                        try dwarf.blockConst(pt, di_nw, field_value)
+                    else
+                        unreachable;
+                },
+                inline .array_type, .vector_type => |sequence_type| {
+                    const child_ty: Type = .fromInterned(sequence_type.child);
+                    const child_class = child_ty.classify(zcu);
+                    for (switch (aggregate.storage) {
+                        .bytes => unreachable,
+                        .elems => |elems| elems,
+                        .repeated_elem => |*repeated_elem| repeated_elem[0..1],
+                    }) |elem| {
+                        try dwarf.abbrevCode(di_nw, if (child_class.comptimeOnly())
+                            .comptime_value_elem_comptime
+                        else if (child_class.hasRuntimeBits())
+                            .comptime_value_elem_runtime
+                        else
+                            break);
+                        if (child_class.comptimeOnly())
+                            try dwarf.refConst(pt, di_nw, .fromInterned(elem))
+                        else if (child_class.hasRuntimeBits())
+                            try dwarf.blockConst(pt, di_nw, .fromInterned(elem))
+                        else
+                            unreachable;
+                    }
+                },
+                else => unreachable,
+            }
+            try di_w.writeUleb128(@backingInt(AbbrevCode.null));
+        },
+        .un => |un| {
+            try dwarf.abbrevCode(di_nw, .aggregate_undefined_comptime_value);
+            try dwarf.refType(pt, di_nw, .fromInterned(un.ty));
+            {
+                const loaded_union = ip.loadUnionType(un.ty);
+                assert(loaded_union.layout == .auto);
+                const field_index = zcu.unionTagFieldIndex(loaded_union, Value.fromInterned(un.tag)).?;
+                const field_ty: Type = .fromInterned(loaded_union.field_types.get(ip)[field_index]);
+                const field_class = field_ty.classify(zcu);
+                const field_name =
+                    ip.loadEnumType(loaded_union.enum_tag_type).field_names.get(ip)[field_index];
+                try dwarf.abbrevCode(di_nw, if (field_class.comptimeOnly())
+                    .comptime_value_field_comptime
+                else if (field_class.hasRuntimeBits())
+                    .comptime_value_field_runtime
+                else
+                    .access);
+                try dwarf.strp(&dwarf.debug_str, di_nw, field_name.toSlice(ip));
+                if (field_class.comptimeOnly())
+                    try dwarf.refConst(pt, di_nw, .fromInterned(un.val))
+                else if (field_class.hasRuntimeBits())
+                    try dwarf.blockConst(pt, di_nw, .fromInterned(un.val));
+            }
+            try di_w.writeUleb128(@backingInt(AbbrevCode.null));
+        },
 
         .memoized_call => unreachable, // not a value
     }
     try dwarf.genDebugInfoPadding(di_w, di_w.unusedCapacityLen());
 }
 
-fn optRepr(opt_child_type: Type, zcu: *const Zcu) enum { unpacked, opv_null, error_set, pointer } {
-    if (opt_child_type.isNoReturn(zcu)) return .opv_null;
-    return switch (opt_child_type.toIntern()) {
+fn optRepr(opt_child_ty: Type, zcu: *const Zcu) enum { unpacked, opv_null, error_set, pointer } {
+    if (opt_child_ty.isNoReturn(zcu)) return .opv_null;
+    return switch (opt_child_ty.toIntern()) {
         .anyerror_type => .error_set,
-        else => switch (zcu.intern_pool.indexToKey(opt_child_type.toIntern())) {
+        else => switch (zcu.intern_pool.indexToKey(opt_child_ty.toIntern())) {
             else => .unpacked,
             .error_set_type, .inferred_error_set_type => .error_set,
             .ptr_type => |ptr_type| if (ptr_type.flags.is_allowzero) .unpacked else .pointer,
@@ -4096,10 +4517,10 @@ pub const AbbrevCode = enum {
     aggregate_undefined_comptime_value,
     aggregate_comptime_value,
     aggregate_location_comptime_value,
-    comptime_value_field_runtime_bits,
-    comptime_value_field_comptime_state,
-    comptime_value_elem_runtime_bits,
-    comptime_value_elem_comptime_state,
+    comptime_value_field_runtime,
+    comptime_value_field_comptime,
+    comptime_value_elem_runtime,
+    comptime_value_elem_comptime,
 
     const decl_size = uleb128Size(@backingInt(AbbrevCode.decl_instance_extern_func));
     comptime {
@@ -5384,27 +5805,27 @@ pub const AbbrevCode = enum {
                 .{ .location, .exprloc },
             },
         },
-        .comptime_value_field_runtime_bits = .{
+        .comptime_value_field_runtime = .{
             .tag = .member,
             .attrs = &.{
                 .{ .name, .strp },
                 .{ .const_value, .block },
             },
         },
-        .comptime_value_field_comptime_state = .{
+        .comptime_value_field_comptime = .{
             .tag = .member,
             .attrs = &.{
                 .{ .name, .strp },
                 .{ .ZIG_comptime_value, .ref_addr },
             },
         },
-        .comptime_value_elem_runtime_bits = .{
+        .comptime_value_elem_runtime = .{
             .tag = .member,
             .attrs = &.{
                 .{ .const_value, .block },
             },
         },
-        .comptime_value_elem_comptime_state = .{
+        .comptime_value_elem_comptime = .{
             .tag = .member,
             .attrs = &.{
                 .{ .ZIG_comptime_value, .ref_addr },

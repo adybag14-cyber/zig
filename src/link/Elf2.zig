@@ -8773,17 +8773,18 @@ fn updateConstInner(
     switch (elf.base.comp.config.debug_format) {
         .strip => {},
         .dwarf => {
+            switch (pt.zcu.intern_pool.indexToKey(val)) {
+                else => {},
+                .@"extern" => return,
+                .func => |func| {
+                    const fi = try elf.dwarf.getFunc(func.owner_nav);
+                    switch (fi.get(&elf.dwarf).state) {
+                        .unresolved => {},
+                        .resolved => return,
+                    }
+                },
+            }
             {
-                switch (pt.zcu.intern_pool.indexToKey(val)) {
-                    else => {},
-                    .func => |func| {
-                        const fi = try elf.dwarf.getFunc(func.owner_nav);
-                        switch (fi.get(&elf.dwarf).state) {
-                            .unresolved => {},
-                            .resolved => return,
-                        }
-                    },
-                }
                 const gpa = elf.base.comp.gpa;
                 const debug_info_ni = Dwarf.Const.get(cpi, &elf.dwarf).debug_info_ni.unwrap().?;
                 try debug_info_ni.moved(gpa, &elf.mf);
