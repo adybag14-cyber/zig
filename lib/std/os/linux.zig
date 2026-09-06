@@ -878,6 +878,15 @@ pub const HWCAP = switch (native_arch) {
             pub const ARCH_2_07 = 1 << 31;
         };
     },
+    .riscv32, .riscv64 => struct {
+        pub const ISA_A = 1 << 0;
+        pub const ISA_C = 1 << 2;
+        pub const ISA_D = 1 << 3;
+        pub const ISA_F = 1 << 5;
+        pub const ISA_I = 1 << 8;
+        pub const ISA_M = 1 << 12;
+        pub const ISA_V = 1 << 21;
+    },
     .s390x => struct {
         pub const ESAN3 = 1 << 0;
         pub const ZARCH = 1 << 1;
