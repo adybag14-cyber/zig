@@ -933,6 +933,12 @@ pub const HWCAP = switch (native_arch) {
         pub const CRYPTO = 1 << 26;
         pub const ADI = 1 << 27;
     },
+    .x86, .x86_64 => struct {
+        pub const @"2" = struct {
+            pub const RING3MWAIT = 1 << 0;
+            pub const FSGSBASE = 1 << 1;
+        };
+    },
     else => struct {},
 };
 
