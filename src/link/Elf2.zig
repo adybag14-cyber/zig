@@ -5856,10 +5856,11 @@ fn dynsymPtr(elf: *Elf, index: u32) SymPtr {
 }
 
 fn navType(elf: *const Elf, nav_resolved: InternPool.Nav.Resolved) std.elf.STT {
-    const any_non_single_threaded = elf.base.comp.config.any_non_single_threaded;
+    const comp = elf.base.comp;
+    const any_non_single_threaded = comp.config.any_non_single_threaded;
     return if (any_non_single_threaded and nav_resolved.@"threadlocal")
         .TLS
-    else if (elf.base.comp.zcu.?.intern_pool.isFunctionType(nav_resolved.type))
+    else if (comp.zcu.?.intern_pool.isFunctionType(nav_resolved.type))
         .FUNC
     else
         .OBJECT;
@@ -7406,7 +7407,6 @@ fn flushFiles(elf: *Elf) Error!void {
         const debug_line_header_ni = unit.debug_line_header_ni.unwrap().?;
         try debug_line_header_ni.parent(&elf.mf).unwrap().?.nextMoved(gpa, &elf.mf);
         try debug_line_header_ni.moved(gpa, &elf.mf);
-        try debug_line_header_ni.nextMoved(gpa, &elf.mf);
         var dlh_nw: MappedFile.Node.Writer = undefined;
         debug_line_header_ni.writer(gpa, &elf.mf, &dlh_nw);
         defer dlh_nw.deinit();
@@ -8632,38 +8632,77 @@ fn updateNavInner(elf: *Elf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index)
     const ip = &zcu.intern_pool;
 
     const nav = ip.getNav(nav_index);
-    if (ip.indexToKey(nav.resolved.?.value) == .@"extern") return;
-    if (Type.fromInterned(nav.resolved.?.type).hasRuntimeBits(zcu)) {
-        const nmi = try elf.navMapIndex(zcu, nav_index);
-        const ni = nmi.symbol(elf).index().ptr(elf).node.unwrap().?;
+    const mod = zcu.fileByIndex(nav.srcInst(ip).resolveFile(ip)).mod.?;
+    switch (ip.indexToKey(nav.resolved.?.value)) {
+        .@"extern" => |@"extern"| {
+            if (mod.strip or elf.ehdrMachine() != .X86_64) return;
+            const si = try elf.externSymbol(.{
+                .name = @"extern".name.toSlice(ip),
+                .lib_name = @"extern".lib_name.toSlice(ip),
+                .type = elf.navType(nav.resolved.?),
+                .linkage = @"extern".linkage,
+                .visibility = @"extern".visibility,
+            });
+            const dwarf_gi = try elf.dwarf.getGlobal(nav_index);
+            const dwarf_global = dwarf_gi.get(&elf.dwarf);
+            const debug_info_ni = dwarf_global.debug_info_ni.unwrap().?;
+            try debug_info_ni.moved(gpa, &elf.mf);
+            var di_nw: MappedFile.Node.Writer = undefined;
+            debug_info_ni.writer(gpa, &elf.mf, &di_nw);
+            defer di_nw.deinit();
+            elf.resetNodeRelocs(debug_info_ni);
+            try elf.dwarf.updateExtern(pt, &di_nw, switch (elf.ehdrMachine()) {
+                else => unreachable,
+                .X86_64 => .x86_64,
+            }, si, nav_index);
+        },
+        else => if (Type.fromInterned(nav.resolved.?.type).hasRuntimeBits(zcu)) {
+            const nmi = try elf.navMapIndex(zcu, nav_index);
+            const lsi = nmi.symbol(elf);
+            const ni = lsi.index().ptr(elf).node.unwrap().?;
 
-        // Ensure the NAV is marked as moved so that once we're done, `flushMoved` will eventually be
-        // called to apply the NAV's new relocations.
-        try ni.moved(gpa, &elf.mf);
+            // Ensure the NAV is marked as moved so that once we're done, `flushMoved`
+            // will eventually be called to apply the NAV's new relocations.
+            try ni.moved(gpa, &elf.mf);
 
-        {
-            var nw: MappedFile.Node.Writer = undefined;
-            ni.writer(gpa, &elf.mf, &nw);
-            defer nw.deinit();
-            elf.resetNodeRelocs(ni);
-            codegen.generateSymbol(
-                &elf.base,
-                pt,
-                .fromInterned(nav.resolved.?.value),
-                &nw.interface,
-                .{ .atom_index = Node.toAtom(ni) },
-            ) catch |err| switch (err) {
-                else => |e| return e,
-                error.WriteFailed => return nw.err.?,
-            };
-            switch (elf.symPtr(nmi.symbol(elf).index())) {
-                inline else => |sym| elf.targetStore(&sym.size, @intCast(nw.interface.end)),
+            {
+                var nw: MappedFile.Node.Writer = undefined;
+                ni.writer(gpa, &elf.mf, &nw);
+                defer nw.deinit();
+                elf.resetNodeRelocs(ni);
+                codegen.generateSymbol(
+                    &elf.base,
+                    pt,
+                    .fromInterned(nav.resolved.?.value),
+                    &nw.interface,
+                    .{ .atom_index = Node.toAtom(ni) },
+                ) catch |err| switch (err) {
+                    else => |e| return e,
+                    error.WriteFailed => return nw.err.?,
+                };
+                switch (elf.symPtr(nmi.symbol(elf).index())) {
+                    inline else => |sym| elf.targetStore(&sym.size, @intCast(nw.interface.end)),
+                }
             }
-        }
-    } else {
-        if (elf.ehdrMachine() != .X86_64) return;
-        const mod = zcu.fileByIndex(nav.srcInst(ip).resolveFile(ip)).mod.?;
-        if (!mod.strip) try elf.dwarf.updateComptimeGlobal(pt, nav_index);
+
+            if (!mod.strip and elf.ehdrMachine() == .X86_64) {
+                const dwarf_gi = try elf.dwarf.getGlobal(nav_index);
+                const dwarf_global = dwarf_gi.get(&elf.dwarf);
+                const debug_info_ni = dwarf_global.debug_info_ni.unwrap().?;
+                try debug_info_ni.moved(gpa, &elf.mf);
+                var di_nw: MappedFile.Node.Writer = undefined;
+                debug_info_ni.writer(gpa, &elf.mf, &di_nw);
+                defer di_nw.deinit();
+                elf.resetNodeRelocs(debug_info_ni);
+                try elf.dwarf.updateGlobal(pt, &di_nw, switch (elf.ehdrMachine()) {
+                    else => unreachable,
+                    .X86_64 => .x86_64,
+                }, Symbol.Id.local(lsi).toTypeErased(), nav_index);
+            }
+        } else {
+            if (mod.strip or elf.ehdrMachine() != .X86_64) return;
+            try elf.dwarf.updateComptimeGlobal(pt, nav_index);
+        },
     }
 
     // The NAV's node is done---now generate any UAVs or lazy code/data which the NAV needs.
@@ -8851,7 +8890,7 @@ fn updateFuncInner(
         var nw: MappedFile.Node.Writer = undefined;
         ni.writer(gpa, &elf.mf, &nw);
         defer nw.deinit();
-        var debug_output_buf: Dwarf.WipNav.Debug = undefined;
+        var debug_output_buf: Dwarf.WipFunc.Debug = undefined;
         const debug_output: link.File.DebugInfoOutput, const dwarf_func = debug_output: {
             if (elf.ehdrMachine() != .X86_64) break :debug_output .{ .none, undefined };
             const dwarf = &elf.dwarf;
@@ -8862,8 +8901,8 @@ fn updateFuncInner(
             try elf.nodes.ensureUnusedCapacity(gpa, 4);
             const dwarf_fi = try dwarf.getFunc(func.owner_nav);
 
-            const wip_nav = &debug_output_buf.wip_nav;
-            wip_nav.* = .{
+            const wip_func = &debug_output_buf.wip_func;
+            wip_func.* = .{
                 .dwarf = dwarf,
                 .unit = dwarf.getUnit(mod),
                 .func = func_index,
@@ -8879,7 +8918,7 @@ fn updateFuncInner(
                 .fde_writer = undefined,
                 .frame_func_length = undefined,
             };
-            const unit = wip_nav.unit.get(dwarf);
+            const unit = wip_func.unit.get(dwarf);
 
             const frame_align: Alignment = switch (elf.identClass()) {
                 .NONE, _ => unreachable,
@@ -8887,13 +8926,13 @@ fn updateFuncInner(
                 .@"64" => .@"8",
             };
             const frame_ni = unit.frame_ni.unwrap() orelse frame_ni: {
-                const frame_ni = elf.addNodeAssumeCapacity(try switch (wip_nav.frame_format) {
+                const frame_ni = elf.addNodeAssumeCapacity(try switch (wip_func.frame_format) {
                     .debug_frame => elf.shndx.debug_frame,
                     .eh_frame => elf.shndx.eh_frame,
                 }.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
                     .alignment = frame_align.max(elf.mf.flags.block_size),
                     .enable_next_moved = true,
-                }), .{ .unit_frame = wip_nav.unit });
+                }), .{ .unit_frame = wip_func.unit });
                 unit.frame_ni = .wrap(frame_ni);
                 break :frame_ni frame_ni;
             };
@@ -8904,7 +8943,7 @@ fn updateFuncInner(
                         .next_moved = true,
                         .enable_next_moved = true,
                     }),
-                    .{ .unit_frame_cie = wip_nav.unit },
+                    .{ .unit_frame_cie = wip_func.unit },
                 );
                 unit.cie_ni = .wrap(cie_ni);
                 var cie_nw: MappedFile.Node.Writer = undefined;
@@ -8913,14 +8952,13 @@ fn updateFuncInner(
                 dwarf.genDebugFrameCie(&cie_nw.interface, switch (elf.ehdrMachine()) {
                     else => unreachable,
                     .X86_64 => .x86_64,
-                }, wip_nav.frame_format) catch |err| switch (err) {
+                }, wip_func.frame_format) catch |err| switch (err) {
                     error.WriteFailed => return cie_nw.err.?,
                 };
             }
             const dwarf_func = dwarf_fi.get(dwarf);
             const fde_ni = if (dwarf_func.fde_ni.unwrap()) |fde_ni| fde_ni: {
                 try fde_ni.moved(gpa, &elf.mf);
-                try fde_ni.nextMoved(gpa, &elf.mf);
                 break :fde_ni fde_ni;
             } else fde_ni: {
                 const fde_ni = elf.addNodeAssumeCapacity(try frame_ni.addFloatingChild(gpa, &elf.mf, .{
@@ -8932,9 +8970,9 @@ fn updateFuncInner(
                 dwarf_func.fde_ni = .wrap(fde_ni);
                 break :fde_ni fde_ni;
             };
-            fde_ni.writer(gpa, &elf.mf, &wip_nav.fde_writer);
+            fde_ni.writer(gpa, &elf.mf, &wip_func.fde_writer);
 
-            if (mod.strip) break :debug_output .{ .{ .eh_frame = wip_nav }, dwarf_func };
+            if (mod.strip) break :debug_output .{ .{ .eh_frame = wip_func }, dwarf_func };
 
             const debug = &debug_output_buf;
             debug.pt = pt;
@@ -8947,7 +8985,6 @@ fn updateFuncInner(
                 .debug_info_ni = debug_info_ni.toOptional(),
             });
             try debug_info_ni.moved(gpa, &elf.mf);
-            try debug_info_ni.nextMoved(gpa, &elf.mf);
             debug_info_ni.writer(gpa, &elf.mf, &debug.info_writer);
 
             const debug_line_ni = dwarf_func.debug_line_ni.unwrap() orelse debug_line_ni: {
@@ -8973,17 +9010,17 @@ fn updateFuncInner(
         };
         switch (debug_output) {
             .dwarf => unreachable,
-            .eh_frame => |wip_nav| {
+            .eh_frame => |wip_func| {
                 elf.resetNodeRelocs(dwarf_func.fde_ni.unwrap().?);
-                try wip_nav.genDebugFrameHeader();
+                try wip_func.genDebugFrameHeader();
             },
             .dwarf2 => |debug| {
                 elf.resetNodeRelocs(dwarf_func.fde_ni.unwrap().?);
-                try debug.wip_nav.genDebugFrameHeader();
+                try debug.wip_func.genDebugFrameHeader();
                 elf.resetNodeRelocs(dwarf_func.debug_line_ni.unwrap().?);
                 try debug.startDebugLine();
                 elf.resetNodeRelocs(dwarf_func.debug_info_ni.unwrap().?);
-                try debug.startFuncDebugInfo();
+                try debug.startDebugInfo();
             },
             .none => {},
         }
@@ -9006,25 +9043,25 @@ fn updateFuncInner(
         }
         switch (debug_output) {
             .dwarf => unreachable,
-            .eh_frame => |wip_nav| wip_nav.finishDebugFrameFde(func_length),
+            .eh_frame => |wip_func| wip_func.finishDebugFrameFde(func_length),
             .dwarf2 => |debug| {
-                try debug.finishFunc(func_length);
-                const unit = debug.wip_nav.unit.get(debug.wip_nav.dwarf);
+                try debug.finish(func_length);
+                const unit = debug.wip_func.unit.get(debug.wip_func.dwarf);
                 {
                     var dr_nw: MappedFile.Node.Writer = undefined;
                     unit.debug_rnglists_ni.unwrap().?.writer(gpa, &elf.mf, &dr_nw);
                     defer dr_nw.deinit();
                     const first_symbol_reloc = elf.symbol_relocs.items.len;
-                    debug.wip_nav.dwarf.genDebugRnglists(
+                    debug.wip_func.dwarf.genDebugRnglists(
                         unit,
                         &dr_nw,
-                        debug.wip_nav.func_si,
+                        debug.wip_func.func_si,
                         func_length,
                     ) catch |err| switch (err) {
                         else => |e| return e,
                         error.WriteFailed => return dr_nw.err.?,
                     };
-                    const symbol_relocs = &elf.dwarf_units[@backingInt(debug.wip_nav.unit)]
+                    const symbol_relocs = &elf.dwarf_units[@backingInt(debug.wip_func.unit)]
                         .debug_rnglists_symbol_relocs;
                     try symbol_relocs.ensureUnusedCapacity(gpa, elf.symbol_relocs.items.len -
                         first_symbol_reloc);
@@ -9034,7 +9071,7 @@ fn updateFuncInner(
                             {},
                         );
                 }
-                debug.wip_nav.finishDebugFrameFde(func_length);
+                debug.wip_func.finishDebugFrameFde(func_length);
                 if (func.analysisUnordered(ip).inferred_error_set) {
                     const ies = ip.getIfExists(.{ .inferred_error_set_type = func_index }).?;
                     if (elf.dwarf.const_pool.getIfExists(ies)) |cpi|
