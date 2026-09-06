@@ -66,6 +66,8 @@ pub fn detectNativeCpuAndFeatures(
 
         setFeature(&cpu, .lvz, (hwcap_bits & HWCAP.LVZ) != 0);
         setFeature(&cpu, .lbt, (hwcap_bits & HWCAP.LBT_X86) != 0 and (hwcap_bits & HWCAP.LBT_ARM) != 0 and (hwcap_bits & HWCAP.LBT_MIPS) != 0);
+
+        setFeature(&cpu, .lam_bh, (hwcap_bits & HWCAP.LAM_BH) != 0);
     } else {
         setFeature(&cpu, .ual, false);
 
@@ -76,11 +78,12 @@ pub fn detectNativeCpuAndFeatures(
 
         setFeature(&cpu, .lvz, false);
         setFeature(&cpu, .lbt, false);
+
+        setFeature(&cpu, .lam_bh, false);
     }
 
     setFeature(&cpu, .frecipe, bit(cfg2, 25));
     setFeature(&cpu, .div32, bit(cfg2, 26));
-    setFeature(&cpu, .lam_bh, bit(cfg2, 27));
     setFeature(&cpu, .lamcas, bit(cfg2, 28));
     setFeature(&cpu, .scq, bit(cfg2, 30));
 
