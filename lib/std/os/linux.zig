@@ -677,6 +677,7 @@ pub const HWCAP = switch (native_arch) {
         pub const PTW = 1 << 13;
         pub const LSPW = 1 << 14;
         pub const SCQ = 1 << 15;
+        pub const LAM_BH = 1 << 16;
     },
     else => struct {},
 };
