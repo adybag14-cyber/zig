@@ -828,6 +828,31 @@ pub const HWCAP = switch (native_arch) {
         pub const LOONGSON_EXT2 = 1 << 13;
         pub const LOONGSON_CPUCFG = 1 << 14;
     },
+    .s390x => struct {
+        pub const ESAN3 = 1 << 0;
+        pub const ZARCH = 1 << 1;
+        pub const STFLE = 1 << 2;
+        pub const MSA = 1 << 3;
+        pub const LDISP = 1 << 4;
+        pub const EIMM = 1 << 5;
+        pub const DFP = 1 << 6;
+        pub const HPAGE = 1 << 7;
+        pub const ETF3EH = 1 << 8;
+        pub const HIGH_GPRS = 1 << 9;
+        pub const TE = 1 << 10;
+        pub const VXRS = 1 << 11;
+        pub const VXRS_BCD = 1 << 12;
+        pub const VXRS_EXT = 1 << 13;
+        pub const GS = 1 << 14;
+        pub const VXRS_EXT2 = 1 << 15;
+        pub const VXRS_PDE = 1 << 16;
+        pub const SORT = 1 << 17;
+        pub const DFLT = 1 << 18;
+        pub const VXRS_PDE2 = 1 << 19;
+        pub const NNPA = 1 << 20;
+        pub const PCI_MIO = 1 << 21;
+        pub const SIE = 1 << 22;
+    },
     else => struct {},
 };
 
