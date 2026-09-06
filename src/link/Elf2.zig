@@ -7197,7 +7197,7 @@ fn prelinkInner(elf: *Elf) Error!void {
         };
         elf.input_pending_index += 1;
 
-        try elf.nodes.ensureUnusedCapacity(gpa, 5 + 4);
+        try elf.nodes.ensureUnusedCapacity(gpa, 4 + 5);
 
         switch (elf.shndx.debug_abbrev) {
             .UNDEF => {},
@@ -7301,7 +7301,7 @@ fn zcuFilesReadyInner(elf: *Elf, zcu: *Zcu) Error!void {
         });
     }
     if (!try elf.dwarf.updateUnits(zcu)) return;
-    try elf.nodes.ensureUnusedCapacity(gpa, 5 * units_len);
+    try elf.nodes.ensureUnusedCapacity(gpa, 6 * units_len);
     for (0..units_len) |unit_index| {
         const ui: Dwarf.Unit.Index = @fromBackingInt(@intCast(unit_index));
         const unit = ui.get(&elf.dwarf);
@@ -8633,37 +8633,37 @@ fn updateNavInner(elf: *Elf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index)
 
     const nav = ip.getNav(nav_index);
     if (ip.indexToKey(nav.resolved.?.value) == .@"extern") return;
-    if (!Type.fromInterned(nav.resolved.?.type).hasRuntimeBits(zcu)) {
+    if (Type.fromInterned(nav.resolved.?.type).hasRuntimeBits(zcu)) {
+        const nmi = try elf.navMapIndex(zcu, nav_index);
+        const ni = nmi.symbol(elf).index().ptr(elf).node.unwrap().?;
+
+        // Ensure the NAV is marked as moved so that once we're done, `flushMoved` will eventually be
+        // called to apply the NAV's new relocations.
+        try ni.moved(gpa, &elf.mf);
+
+        {
+            var nw: MappedFile.Node.Writer = undefined;
+            ni.writer(gpa, &elf.mf, &nw);
+            defer nw.deinit();
+            elf.resetNodeRelocs(ni);
+            codegen.generateSymbol(
+                &elf.base,
+                pt,
+                .fromInterned(nav.resolved.?.value),
+                &nw.interface,
+                .{ .atom_index = Node.toAtom(ni) },
+            ) catch |err| switch (err) {
+                else => |e| return e,
+                error.WriteFailed => return nw.err.?,
+            };
+            switch (elf.symPtr(nmi.symbol(elf).index())) {
+                inline else => |sym| elf.targetStore(&sym.size, @intCast(nw.interface.end)),
+            }
+        }
+    } else {
         if (elf.ehdrMachine() != .X86_64) return;
         const mod = zcu.fileByIndex(nav.srcInst(ip).resolveFile(ip)).mod.?;
-        return if (!mod.strip) elf.dwarf.updateComptimeNav(pt, nav_index);
-    }
-
-    const nmi = try elf.navMapIndex(zcu, nav_index);
-    const ni = nmi.symbol(elf).index().ptr(elf).node.unwrap().?;
-
-    // Ensure the NAV is marked as moved so that once we're done, `flushMoved` will eventually be
-    // called to apply the NAV's new relocations.
-    try ni.moved(gpa, &elf.mf);
-
-    {
-        var nw: MappedFile.Node.Writer = undefined;
-        ni.writer(gpa, &elf.mf, &nw);
-        defer nw.deinit();
-        elf.resetNodeRelocs(ni);
-        codegen.generateSymbol(
-            &elf.base,
-            pt,
-            .fromInterned(nav.resolved.?.value),
-            &nw.interface,
-            .{ .atom_index = Node.toAtom(ni) },
-        ) catch |err| switch (err) {
-            else => |e| return e,
-            error.WriteFailed => return nw.err.?,
-        };
-        switch (elf.symPtr(nmi.symbol(elf).index())) {
-            inline else => |sym| elf.targetStore(&sym.size, @intCast(nw.interface.end)),
-        }
+        if (!mod.strip) try elf.dwarf.updateComptimeNav(pt, nav_index);
     }
 
     // The NAV's node is done---now generate any UAVs or lazy code/data which the NAV needs.
@@ -8726,7 +8726,11 @@ pub fn addConst(
         .code_view => unreachable,
     }
 }
-fn addConstNode(lf: *link.File, ui: Dwarf.Unit.Index, cpi: link.ConstPool.Index) link.Error!MappedFile.Node.Index {
+fn addConstNode(
+    lf: *link.File,
+    ui: Dwarf.Unit.Index,
+    cpi: link.ConstPool.Index,
+) link.Error!MappedFile.Node.Index {
     const elf = lf.cast(.elf2).?;
     const unit = ui.get(&elf.dwarf);
     const debug_info_ni = elf.addNodeAssumeCapacity(
