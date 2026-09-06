@@ -643,6 +643,22 @@ pub const HWCAP = switch (native_arch) {
         pub const IDIV = IDIVA | IDIVT;
         pub const LPAE = 1 << 20;
         pub const EVTSTRM = 1 << 21;
+        pub const FPHP = 1 << 22;
+        pub const ASIMDHP = 1 << 23;
+        pub const ASIMDDP = 1 << 24;
+        pub const ASIMDFHM = 1 << 25;
+        pub const ASIMDBF16 = 1 << 26;
+        pub const I8MM = 1 << 27;
+
+        pub const @"2" = struct {
+            pub const AES = 1 << 0;
+            pub const PMULL = 1 << 1;
+            pub const SHA1 = 1 << 2;
+            pub const SHA2 = 1 << 3;
+            pub const CRC32 = 1 << 4;
+            pub const SB = 1 << 5;
+            pub const SSBS = 1 << 6;
+        };
     },
     .loongarch32, .loongarch64 => struct {
         pub const CPUCFG = 1 << 0;
