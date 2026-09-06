@@ -10533,8 +10533,9 @@ pub const sendfile = switch (native_os) {
     .linux => private.sendfile,
     else => {},
 };
-/// See std.elf for constants for this
-pub extern "c" fn getauxval(__type: c_ulong) c_ulong;
+
+pub extern "c" fn getauxval(type: c_ulong) c_ulong;
+pub extern "c" fn elf_aux_info(aux: c_int, buf: *anyopaque, buflen: c_int) c_int;
 
 pub extern "c" fn dl_iterate_phdr(callback: dl_iterate_phdr_callback, data: ?*anyopaque) c_int;
 
