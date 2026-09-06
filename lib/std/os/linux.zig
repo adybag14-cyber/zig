@@ -853,6 +853,36 @@ pub const HWCAP = switch (native_arch) {
         pub const PCI_MIO = 1 << 21;
         pub const SIE = 1 << 22;
     },
+    .sparc, .sparc64 => struct {
+        pub const FLUSH = 1 << 0;
+        pub const STBAR = 1 << 1;
+        pub const SWAP = 1 << 2;
+        pub const MULDIV = 1 << 3;
+        pub const V9 = 1 << 4;
+        pub const ULTRA3 = 1 << 5;
+        pub const BLKINIT = 1 << 6;
+        pub const N2 = 1 << 7;
+        pub const MUL32 = 1 << 8;
+        pub const DIV32 = 1 << 9;
+        pub const FSMULD = 1 << 10;
+        pub const V8PLUS = 1 << 11;
+        pub const POPC = 1 << 12;
+        pub const VIS = 1 << 13;
+        pub const VIS2 = 1 << 14;
+        pub const ASI_BLK_INIT = 1 << 15;
+        pub const FMAF = 1 << 16;
+        pub const VIS3 = 1 << 17;
+        pub const HPC = 1 << 18;
+        pub const RANDOM = 1 << 19;
+        pub const TRANS = 1 << 20;
+        pub const FJFMAU = 1 << 21;
+        pub const IMA = 1 << 22;
+        pub const ASI_CACHE_SPARING = 1 << 23;
+        pub const PAUSE = 1 << 24;
+        pub const CBCOND = 1 << 25;
+        pub const CRYPTO = 1 << 26;
+        pub const ADI = 1 << 27;
+    },
     else => struct {},
 };
 
