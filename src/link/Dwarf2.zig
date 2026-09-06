@@ -1395,8 +1395,7 @@ pub fn getConst(dwarf: *Dwarf, pt: Zcu.PerThread, val: Value) link.Error!link.Co
 
 pub fn getGlobal(dwarf: *Dwarf, nav: InternPool.Nav.Index) link.Error!Global.Index {
     const comp = dwarf.lf.comp;
-    const gpa = comp.gpa;
-    const global_gop = try dwarf.globals.getOrPut(gpa, nav);
+    const global_gop = try dwarf.globals.getOrPut(comp.gpa, nav);
     if (!global_gop.found_existing) global_gop.value_ptr.* = .{
         .debug_info_ni = .none,
     };
@@ -1405,15 +1404,15 @@ pub fn getGlobal(dwarf: *Dwarf, nav: InternPool.Nav.Index) link.Error!Global.Ind
     const mod = comp.zcu.?.navFileScope(nav).mod.?;
     assert(!mod.strip);
     if (dwarf.lf.cast(.elf2)) |elf| {
-        try elf.nodes.ensureUnusedCapacity(gpa, 1);
-        try elf.dwarf_globals.append(gpa, .{
+        try elf.nodes.ensureUnusedCapacity(comp.gpa, 1);
+        try elf.dwarf_globals.append(comp.gpa, .{
             .debug_info_first_target_reloc = .none,
             .debug_info_first_node_reloc = .none,
             .debug_info_first_symbol_reloc = .none,
         });
         const unit = dwarf.getUnit(mod).get(dwarf);
         global_gop.value_ptr.debug_info_ni = .wrap(elf.addNodeAssumeCapacity(
-            unit.debug_info_ni.unwrap().?.addFloatingChild(gpa, &elf.mf, .{
+            unit.debug_info_ni.unwrap().?.addFloatingChild(comp.gpa, &elf.mf, .{
                 .enable_next_moved = true,
             }) catch |err| switch (err) {
                 else => |e| return e,
@@ -1983,7 +1982,7 @@ pub fn updateComptimeGlobal(
         .unnamed_test, .@"test", .decltest => return,
         .@"comptime", .@"const", .@"var" => {},
     }
-    done: switch (ip.indexToKey(nav_val.toIntern())) {
+    switch (ip.indexToKey(nav_val.toIntern())) {
         .int_type,
         .ptr_type,
         .array_type,
@@ -1997,35 +1996,6 @@ pub fn updateComptimeGlobal(
         .error_set_type,
         .inferred_error_set_type,
         .spirv_type,
-        => try dwarf.genDeclType(pt, global, &decl),
-        .struct_type => {
-            const loaded_struct = ip.loadStructType(nav_val.toIntern());
-            if (global.toOptional() == loaded_struct.name_nav)
-                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern())
-            else
-                try dwarf.genDeclType(pt, global, &decl);
-        },
-        .enum_type => {
-            const loaded_enum = ip.loadEnumType(nav_val.toIntern());
-            if (global.toOptional() == loaded_enum.name_nav)
-                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern())
-            else
-                try dwarf.genDeclType(pt, global, &decl);
-        },
-        .union_type => {
-            const loaded_union = ip.loadUnionType(nav_val.toIntern());
-            if (global.toOptional() == loaded_union.name_nav)
-                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern())
-            else
-                try dwarf.genDeclType(pt, global, &decl);
-        },
-        .opaque_type => {
-            const loaded_opaque = ip.loadOpaqueType(nav_val.toIntern());
-            if (global.toOptional() == loaded_opaque.name_nav)
-                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern())
-            else
-                try dwarf.genDeclType(pt, global, &decl);
-        },
         .undef,
         .simple_value,
         .int,
@@ -2040,18 +2010,39 @@ pub fn updateComptimeGlobal(
         .aggregate,
         .un,
         .bitpack,
-        => try dwarf.genDeclGlobal(pt, global, &decl),
+        => try dwarf.genGlobal(pt, global, &decl),
+        .struct_type => {
+            const loaded_struct = ip.loadStructType(nav_val.toIntern());
+            if (global.toOptional() == loaded_struct.name_nav) {
+                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
+            } else try dwarf.genGlobal(pt, global, &decl);
+        },
+        .enum_type => {
+            const loaded_enum = ip.loadEnumType(nav_val.toIntern());
+            if (global.toOptional() == loaded_enum.name_nav) {
+                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
+            } else try dwarf.genGlobal(pt, global, &decl);
+        },
+        .union_type => {
+            const loaded_union = ip.loadUnionType(nav_val.toIntern());
+            if (global.toOptional() == loaded_union.name_nav) {
+                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
+            } else try dwarf.genGlobal(pt, global, &decl);
+        },
+        .opaque_type => {
+            const loaded_opaque = ip.loadOpaqueType(nav_val.toIntern());
+            if (global.toOptional() == loaded_opaque.name_nav) {
+                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
+            } else try dwarf.genGlobal(pt, global, &decl);
+        },
         .@"extern" => unreachable,
         .func => |func| if (func.owner_nav == global and func.generic_owner == .none) {
             _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
-            break :done;
         } else return,
-        // memoization, not values
-        .memoized_call => unreachable,
+        .memoized_call => unreachable, // not a value
     }
 }
-
-fn genDeclType(
+fn genGlobal(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
     global: InternPool.Nav.Index,
@@ -2065,12 +2056,12 @@ fn genDeclType(
         elf.resetNodeRelocs(debug_info_ni);
     } else unreachable;
     defer di_nw.deinit();
-    dwarf.genDeclTypeInner(pt, &di_nw, global, decl) catch |err| switch (err) {
+    dwarf.genGlobalInner(pt, &di_nw, global, decl) catch |err| switch (err) {
         error.WriteFailed => return dwarf.reportWriteError(&di_nw),
         else => |e| return e,
     };
 }
-fn genDeclTypeInner(
+fn genGlobalInner(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
     di_nw: *link.MappedFile.Node.Writer,
@@ -2080,94 +2071,70 @@ fn genDeclTypeInner(
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
     const nav = ip.getNav(global);
+    const nav_const, const nav_ty: Type, const nav_align, const nav_val: Value = nav_resolved: {
+        const nav_resolved = nav.resolved.?;
+        break :nav_resolved .{
+            nav_resolved.@"const",
+            .fromInterned(nav_resolved.type),
+            nav_resolved.@"align",
+            .fromInterned(nav_resolved.value),
+        };
+    };
+    const nav_class = nav_ty.classify(zcu);
     const parent_ty = ip.namespacePtr(nav.analysis.?.namespace).owner_type;
     const di_w = &di_nw.interface;
     if (Type.fromInterned(parent_ty).getCaptures(zcu).len > 0) {
-        try dwarf.abbrevCode(di_nw, .decl_instance_type);
+        try dwarf.abbrevCode(di_nw, switch (nav_ty.toIntern()) {
+            .type_type => .decl_instance_type,
+            else => if (nav_const) switch (nav_class) {
+                .no_possible_value, .one_possible_value => .decl_instance_const,
+                .runtime => .decl_instance_const_fully_runtime,
+                .partially_comptime => .decl_instance_const_partially_comptime,
+                .fully_comptime => .decl_instance_const_fully_comptime,
+            } else .decl_instance_var,
+        });
         try dwarf.refType(pt, di_nw, .fromInterned(parent_ty));
         try dwarf.secOffset(di_nw, try dwarf.getGlobalDecl(pt, global), 0);
     } else {
         const parent_ni = try dwarf.getConstDecl(pt, parent_ty);
-        try dwarf.abbrevCode(di_nw, .decl_type);
+        try dwarf.abbrevCode(di_nw, switch (nav_ty.toIntern()) {
+            .type_type => .decl_type,
+            else => if (nav_const) switch (nav_class) {
+                .no_possible_value, .one_possible_value => .decl_const,
+                .runtime => .decl_const_fully_runtime,
+                .partially_comptime => .decl_const_partially_comptime,
+                .fully_comptime => .decl_const_fully_comptime,
+            } else .decl_var,
+        });
         try dwarf.secOffset(di_nw, parent_ni, 0);
         try di_w.writeInt(u32, decl.src_line + 1, dwarf.endian);
         try di_w.writeUleb128(decl.src_column + 1);
         try di_w.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
         try dwarf.strp(&dwarf.debug_str, di_nw, nav.name.toSlice(ip));
     }
-    try dwarf.refConst(pt, di_nw, .fromInterned(nav.resolved.?.value));
-    try dwarf.genDebugInfoPadding(di_w, di_w.unusedCapacityLen());
-}
-
-fn genDeclGlobal(
-    dwarf: *Dwarf,
-    pt: Zcu.PerThread,
-    global: InternPool.Nav.Index,
-    decl: *const std.zig.Zir.Inst.Declaration.Unwrapped,
-) link.Error!void {
-    const gi = try dwarf.getGlobal(global);
-    const debug_info_ni = gi.get(dwarf).debug_info_ni.unwrap().?;
-    var di_nw: link.MappedFile.Node.Writer = undefined;
-    if (dwarf.lf.cast(.elf2)) |elf| {
-        debug_info_ni.writer(pt.zcu.gpa, &elf.mf, &di_nw);
-        elf.resetNodeRelocs(debug_info_ni);
-    } else unreachable;
-    defer di_nw.deinit();
-    dwarf.genDeclGlobalInner(pt, &di_nw, global, decl) catch |err| switch (err) {
-        error.WriteFailed => return dwarf.reportWriteError(&di_nw),
-        else => |e| return e,
-    };
-}
-fn genDeclGlobalInner(
-    dwarf: *Dwarf,
-    pt: Zcu.PerThread,
-    di_nw: *link.MappedFile.Node.Writer,
-    global: InternPool.Nav.Index,
-    decl: *const std.zig.Zir.Inst.Declaration.Unwrapped,
-) link.EmitError!void {
-    const zcu = pt.zcu;
-    const ip = &zcu.intern_pool;
-    const nav = ip.getNav(global);
-    const nav_const, const nav_ty: Type, const nav_align, const nav_val: Value = resolved: {
-        const resolved = nav.resolved.?;
-        break :resolved .{
-            resolved.@"const",
-            .fromInterned(resolved.type),
-            resolved.@"align",
-            .fromInterned(resolved.value),
-        };
-    };
-    const nav_class = nav_ty.classify(zcu);
-    const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(nav.analysis.?.namespace).owner_type);
-    const di_w = &di_nw.interface;
-    try dwarf.abbrevCode(di_nw, if (nav_const) switch (nav_class) {
-        .no_possible_value, .one_possible_value => .decl_const,
-        .runtime => .decl_const_fully_runtime,
-        .partially_comptime => .decl_const_partially_comptime,
-        .fully_comptime => .decl_const_fully_comptime,
-    } else .decl_var);
-    try dwarf.secOffset(di_nw, parent_ni, 0);
-    try di_w.writeInt(u32, decl.src_line + 1, dwarf.endian);
-    try di_w.writeUleb128(decl.src_column + 1);
-    try di_w.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
-    try dwarf.strp(&dwarf.debug_str, di_nw, nav.name.toSlice(ip));
-    try dwarf.strp(&dwarf.debug_str, di_nw, switch (decl.linkage) {
-        .normal => nav.fqn,
-        .@"extern", .@"export" => nav.name,
-    }.toSlice(ip));
-    const type_offset = di_w.end;
-    if (nav_const) try dwarf.secOffsetPlaceholder(di_w) else {
-        try dwarf.refType(pt, di_nw, nav_ty);
-        try dwarf.blockConst(pt, di_nw, nav_val);
-    }
-    try di_w.writeUleb128(nav_align.toByteUnits() orelse nav_ty.abiAlignment(zcu).toByteUnits().?);
-    try di_w.writeByte(@intFromBool(decl.linkage != .normal));
-    if (nav_const) {
-        if (nav_class.hasRuntimeBits()) try dwarf.blockConst(pt, di_nw, nav_val);
-        if (nav_class.comptimeOnly()) try dwarf.refConst(pt, di_nw, nav_val);
-        try dwarf.secOffsetFinish(di_nw, type_offset, di_nw.ni, di_w.end);
-        try dwarf.abbrevCode(di_nw, .is_const);
-        try dwarf.refType(pt, di_nw, nav_ty);
+    switch (nav_ty.toIntern()) {
+        .type_type => try dwarf.refConst(pt, di_nw, nav_val),
+        else => {
+            try dwarf.strp(&dwarf.debug_str, di_nw, switch (decl.linkage) {
+                .normal => nav.fqn,
+                .@"extern", .@"export" => nav.name,
+            }.toSlice(ip));
+            const type_offset = di_w.end;
+            if (nav_const) try dwarf.secOffsetPlaceholder(di_w) else {
+                try dwarf.refType(pt, di_nw, nav_ty);
+                try dwarf.blockConst(pt, di_nw, nav_val);
+            }
+            try di_w.writeUleb128(nav_align.toByteUnits() orelse
+                nav_ty.abiAlignment(zcu).toByteUnits().?);
+            try di_w.writeByte(@intFromBool(decl.linkage != .normal));
+            if (nav_const) {
+                if (nav_class.hasRuntimeBits()) try dwarf.blockConst(pt, di_nw, nav_val);
+                if (nav_class.comptimeOnly()) try dwarf.refConst(pt, di_nw, nav_val);
+                try dwarf.secOffsetFinish(di_nw, type_offset, di_nw.ni, di_w.end);
+                try dwarf.abbrevCode(di_nw, .is_const);
+                try dwarf.refType(pt, di_nw, nav_ty);
+            }
+        },
     }
     try dwarf.genDebugInfoPadding(di_w, di_w.unusedCapacityLen());
 }
@@ -2617,6 +2584,9 @@ fn updateConstInner(
                     .auto, .@"extern" => .decl_instance_empty_struct,
                     .@"packed" => .decl_instance_empty_packed_struct,
                 });
+                try dwarf.refType(pt, di_nw, .fromInterned(ip.namespacePtr(
+                    ip.namespacePtr(loaded_struct.namespace).parent.unwrap().?,
+                ).owner_type));
                 try dwarf.secOffset(di_nw, try dwarf.getConstDecl(pt, val), 0);
             } else if (loaded_struct.name_nav.unwrap()) |name_ni| {
                 const name_nav = ip.getNav(name_ni);
@@ -2750,6 +2720,9 @@ fn updateConstInner(
                     .auto, .@"extern" => .decl_instance_empty_union,
                     .@"packed" => .decl_instance_empty_packed_union,
                 });
+                try dwarf.refType(pt, di_nw, .fromInterned(ip.namespacePtr(
+                    ip.namespacePtr(loaded_union.namespace).parent.unwrap().?,
+                ).owner_type));
                 try dwarf.secOffset(di_nw, try dwarf.getConstDecl(pt, val), 0);
             } else if (loaded_union.name_nav.unwrap()) |name_ni| {
                 const name_nav = ip.getNav(name_ni);
@@ -2883,6 +2856,9 @@ fn updateConstInner(
                             .decl_instance_enum
                         else
                             .decl_instance_empty_enum);
+                        try dwarf.refType(pt, di_nw, .fromInterned(ip.namespacePtr(
+                            ip.namespacePtr(loaded_enum.namespace).parent.unwrap().?,
+                        ).owner_type));
                         try dwarf.secOffset(di_nw, try dwarf.getConstDecl(pt, val), 0);
                     } else if (loaded_enum.name_nav.unwrap()) |name_ni| {
                         const name_nav = ip.getNav(name_ni);
@@ -3297,6 +3273,9 @@ fn updateConstIncompleteInner(
                 .@"union" => .decl_instance_empty_incomplete_union,
                 .@"enum" => .decl_instance_empty_incomplete_enum,
             });
+            try dwarf.refType(pt, di_nw, .fromInterned(ip.namespacePtr(
+                ip.namespacePtr(namespace).parent.unwrap().?,
+            ).owner_type));
             try dwarf.secOffset(di_nw, try dwarf.getConstDecl(pt, val), 0);
         } else if (maybe_name_nav.unwrap()) |name_ni| {
             const name_nav = ip.getNav(name_ni);
@@ -3625,15 +3604,19 @@ fn genDeclInner(
         },
         .global => |global| {
             const nav = ip.getNav(global);
+            const nav_const, const nav_ty = nav_resolved: {
+                const nav_resolved = nav.resolved.?;
+                break :nav_resolved .{ nav_resolved.@"const", nav_resolved.type };
+            };
             const src_inst = nav.srcInst(ip).resolveFull(ip).?;
             const decl = zcu.fileByIndex(src_inst.file).zir.?.getDeclaration(src_inst.inst);
             const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
                 nav.analysis.?.namespace,
             ).owner_type);
-            try dwarf.abbrevCode(di_nw, if (nav.resolved.?.@"const") switch (nav.resolved.?.type) {
+            try dwarf.abbrevCode(di_nw, switch (nav_ty) {
                 .type_type => .decl_specification_type,
-                else => .decl_specification_const,
-            } else .decl_specification_var);
+                else => if (nav_const) .decl_specification_const else .decl_specification_var,
+            });
             try dwarf.secOffset(di_nw, parent_ni, 0);
             try di_w.writeInt(u32, decl.src_line + 1, dwarf.endian);
             try di_w.writeUleb128(decl.src_column + 1);
@@ -4003,7 +3986,6 @@ pub const AbbrevCode = enum {
     decl_specification_const,
     decl_specification_var,
     decl_specification_func,
-    decl_instance_type,
     decl_instance_empty_incomplete_enum,
     decl_instance_incomplete_enum,
     decl_instance_empty_enum,
@@ -4020,11 +4002,12 @@ pub const AbbrevCode = enum {
     decl_instance_union,
     decl_instance_empty_packed_union,
     decl_instance_packed_union,
-    decl_instance_var,
+    decl_instance_type,
     decl_instance_const,
-    decl_instance_const_runtime_bits,
-    decl_instance_const_comptime_state,
-    decl_instance_const_runtime_bits_comptime_state,
+    decl_instance_const_fully_runtime,
+    decl_instance_const_partially_comptime,
+    decl_instance_const_fully_comptime,
+    decl_instance_var,
     decl_instance_empty_func,
     decl_instance_func,
     decl_instance_empty_func_generic,
@@ -4149,6 +4132,7 @@ pub const AbbrevCode = enum {
         .{ .declaration, .flag_present },
     };
     const decl_instance_attrs = &[_]Attr{
+        .{ .ZIG_parent, .ref_addr },
         .{ .specification, .ref_addr },
     };
 
@@ -4368,16 +4352,6 @@ pub const AbbrevCode = enum {
                 .{ .import, .ref_addr },
             },
         },
-        .decl_var = .{
-            .tag = .variable,
-            .attrs = decl_attrs ++ .{
-                .{ .linkage_name, .strp },
-                .{ .type, .ref_addr },
-                .{ .location, .exprloc },
-                .{ .alignment, .udata },
-                .{ .external, .flag },
-            },
-        },
         .decl_const = .{
             .tag = .constant,
             .attrs = decl_attrs ++ .{
@@ -4416,6 +4390,16 @@ pub const AbbrevCode = enum {
                 .{ .alignment, .udata },
                 .{ .external, .flag },
                 .{ .ZIG_comptime_value, .ref_addr },
+            },
+        },
+        .decl_var = .{
+            .tag = .variable,
+            .attrs = decl_attrs ++ .{
+                .{ .linkage_name, .strp },
+                .{ .type, .ref_addr },
+                .{ .location, .exprloc },
+                .{ .alignment, .udata },
+                .{ .external, .flag },
             },
         },
         .decl_empty_func = .{
@@ -4547,14 +4531,6 @@ pub const AbbrevCode = enum {
             .tag = .subprogram,
             .attrs = decl_specification_attrs,
         },
-        .decl_instance_type = .{
-            .tag = .imported_declaration,
-            .attrs = .{
-                .{ .ZIG_parent, .ref_addr },
-            } ++ decl_instance_attrs ++ .{
-                .{ .import, .ref_addr },
-            },
-        },
         .decl_instance_empty_incomplete_enum = .{
             .tag = .enumeration_type,
             .attrs = decl_instance_attrs,
@@ -4651,14 +4627,10 @@ pub const AbbrevCode = enum {
                 .{ .type, .ref_addr },
             },
         },
-        .decl_instance_var = .{
-            .tag = .variable,
+        .decl_instance_type = .{
+            .tag = .imported_declaration,
             .attrs = decl_instance_attrs ++ .{
-                .{ .linkage_name, .strp },
-                .{ .type, .ref_addr },
-                .{ .location, .exprloc },
-                .{ .alignment, .udata },
-                .{ .external, .flag },
+                .{ .import, .ref_addr },
             },
         },
         .decl_instance_const = .{
@@ -4670,7 +4642,7 @@ pub const AbbrevCode = enum {
                 .{ .external, .flag },
             },
         },
-        .decl_instance_const_runtime_bits = .{
+        .decl_instance_const_fully_runtime = .{
             .tag = .constant,
             .attrs = decl_instance_attrs ++ .{
                 .{ .linkage_name, .strp },
@@ -4680,7 +4652,18 @@ pub const AbbrevCode = enum {
                 .{ .const_value, .block },
             },
         },
-        .decl_instance_const_comptime_state = .{
+        .decl_instance_const_partially_comptime = .{
+            .tag = .constant,
+            .attrs = decl_instance_attrs ++ .{
+                .{ .linkage_name, .strp },
+                .{ .type, .ref_addr },
+                .{ .alignment, .udata },
+                .{ .external, .flag },
+                .{ .const_value, .block },
+                .{ .ZIG_comptime_value, .ref_addr },
+            },
+        },
+        .decl_instance_const_fully_comptime = .{
             .tag = .constant,
             .attrs = decl_instance_attrs ++ .{
                 .{ .linkage_name, .strp },
@@ -4690,15 +4673,14 @@ pub const AbbrevCode = enum {
                 .{ .ZIG_comptime_value, .ref_addr },
             },
         },
-        .decl_instance_const_runtime_bits_comptime_state = .{
-            .tag = .constant,
+        .decl_instance_var = .{
+            .tag = .variable,
             .attrs = decl_instance_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
+                .{ .location, .exprloc },
                 .{ .alignment, .udata },
                 .{ .external, .flag },
-                .{ .const_value, .block },
-                .{ .ZIG_comptime_value, .ref_addr },
             },
         },
         .decl_instance_empty_func = .{

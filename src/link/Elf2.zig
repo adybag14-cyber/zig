@@ -11041,7 +11041,11 @@ pub fn printNode(
             if (nav.resolved) |resolved| try w.print("{f}, ", .{
                 Type.fromInterned(resolved.type).fmt(.{ .zcu = zcu, .tid = tid }),
             });
-            try w.print("{f})", .{nav.fqn.fmt(ip)});
+            try w.print("{f}", .{nav.fqn.fmt(ip)});
+            if (nav.resolved) |resolved| try w.print(", {f}", .{
+                Value.fromInterned(resolved.value).fmtValue(.{ .zcu = zcu, .tid = tid }),
+            });
+            try w.writeByte(')');
         },
         .func_frame_fde, .func_debug_info, .func_debug_line => |fi| {
             const zcu = elf.base.comp.zcu.?;
