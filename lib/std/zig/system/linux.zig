@@ -232,6 +232,66 @@ const arm = struct {
     }
 };
 
+const csky = struct {
+    const cpuinfo = struct {
+        const Impl = struct {
+            model: ?*const Target.Cpu.Model = null,
+
+            const cpu_names = .{
+                .{ "ck807", &Target.csky.cpu.ck807 },
+                .{ "ck807f", &Target.csky.cpu.ck807f },
+                .{ "ck810", &Target.csky.cpu.ck810 },
+                .{ "ck810f", &Target.csky.cpu.ck810f },
+                .{ "ck810t", &Target.csky.cpu.ck810t },
+                .{ "ck810ft", &Target.csky.cpu.ck810ft },
+                .{ "ck860", &Target.csky.cpu.ck860 },
+                .{ "ck860f", &Target.csky.cpu.ck860f },
+                .{ "ck860fv", &Target.csky.cpu.ck860fv },
+            };
+
+            fn lineHook(self: *Impl, key: []const u8, value: []const u8) !bool {
+                if (mem.eql(u8, key, "C-SKY CPU model")) {
+                    inline for (cpu_names) |pair| {
+                        if (mem.eql(u8, value, pair[0])) {
+                            self.model = pair[1];
+                            break;
+                        }
+                    }
+
+                    return false;
+                }
+
+                return true;
+            }
+
+            fn finalize(self: *const Impl, arch: Target.Cpu.Arch) ?Target.Cpu {
+                const model = self.model orelse return null;
+                return .{
+                    .arch = arch,
+                    .model = model,
+                    .features = model.features,
+                };
+            }
+        };
+
+        const Parser = CpuinfoParser(Impl);
+    };
+
+    pub fn detectNativeCpu(io: Io, arch: Target.Cpu.Arch) ?Target.Cpu {
+        var file = Io.Dir.openFileAbsolute(io, "/proc/cpuinfo", .{}) catch return null;
+        defer file.close(io);
+
+        var buffer: [4096]u8 = undefined;
+        var file_reader = file.reader(io, &buffer);
+
+        var cpu = (cpuinfo.Parser.parse(arch, &file_reader.interface) catch null) orelse return null;
+
+        cpu.features.populateDependencies(cpu.arch.allFeaturesList());
+
+        return cpu;
+    }
+};
+
 const powerpc = struct {
     const cpuinfo = struct {
         const Impl = struct {
@@ -757,6 +817,7 @@ pub fn detectNativeCpuAndFeatures(io: Io) ?Target.Cpu {
     return switch (current_arch) {
         .aarch64, .aarch64_be => aarch64.detectNativeCpuAndFeatures(current_arch),
         .arm, .armeb, .thumb, .thumbeb => arm.detectNativeCpu(io, current_arch),
+        .csky => csky.detectNativeCpu(io, current_arch),
         .powerpc, .powerpcle, .powerpc64, .powerpc64le => powerpc.detectNativeCpu(io, current_arch),
         .riscv64, .riscv32 => riscv.detectNativeCpuAndFeatures(io, current_arch),
         .s390x => s390x.detectNativeCpu(io, current_arch),
