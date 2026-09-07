@@ -13,6 +13,7 @@ decls: std.array_hash_map.Auto(InternPool.TrackedInst.Index, Decl),
 pending_decl: struct { di: Decl.Index, instance: Decl.Instance },
 
 debug_abbrev: Abbrev,
+debug_addr: Addr,
 frame: Frame,
 debug_info: Info,
 debug_line: Line,
@@ -182,6 +183,29 @@ pub const Abbrev = struct {
     set: std.enums.EnumSet(AbbrevCode),
 };
 
+pub const Addr = struct {
+    ni: link.MappedFile.Node.Index.Optional,
+    pending_index: usize,
+    map: std.array_hash_map.Auto(link.File.SymbolId, void),
+
+    fn get(a: *Addr, gpa: std.mem.Allocator, si: link.File.SymbolId) std.mem.Allocator.Error!usize {
+        const gop = try a.map.getOrPut(gpa, si);
+        return gop.index;
+    }
+
+    fn tableOffset(dwarf: *Dwarf) usize {
+        return dwarf.unitLengthSize() + 2 + 1 + 1;
+    }
+
+    pub fn size(a: *Addr, dwarf: *Dwarf) usize {
+        return tableOffset(dwarf) + @backingInt(dwarf.address_size) * a.pending_index;
+    }
+
+    pub fn anyPending(a: *Addr) bool {
+        return a.map.count() - a.pending_index > 0;
+    }
+};
+
 pub const Info = struct {};
 
 pub const Line = struct {
@@ -274,12 +298,14 @@ pub const StrOffsets = struct {
     ) link.Error!usize {
         const comp = dwarf.lf.comp;
         try so.map.ensureUnusedCapacity(comp.gpa, 1);
-        return so.map.getOrPutAssumeCapacity(s.get(comp.gpa, mf, str) catch |err| switch (err) {
+        const offset = s.get(comp.gpa, mf, str) catch |err| switch (err) {
             else => |e| return e,
             error.MappedFileIo => return comp.link_diags.fail("failed to write output file: {t}", .{
                 mf.io_err.?,
             }),
-        }).index;
+        };
+        const gop = so.map.getOrPutAssumeCapacity(offset);
+        return gop.index;
     }
 
     fn tableOffset(dwarf: *Dwarf) usize {
@@ -289,13 +315,20 @@ pub const StrOffsets = struct {
     pub fn size(so: *StrOffsets, dwarf: *Dwarf) usize {
         return tableOffset(dwarf) + dwarf.secOffsetSize() * so.pending_index;
     }
+
+    pub fn anyPending(so: *StrOffsets) bool {
+        return so.map.count() - so.pending_index > 0;
+    }
 };
 
 pub const SharedSection = enum { debug_abbrev, debug_line_str, debug_str };
 
 pub const Loc = union(enum) {
     empty,
-    addr_reloc: link.File.SymbolId,
+    addr_sym: struct {
+        si: link.File.SymbolId,
+        offset: usize = 0,
+    },
     deref: *const Loc,
     constu: u64,
     consts: i64,
@@ -314,6 +347,8 @@ pub const Loc = union(enum) {
         node: link.MappedFile.Node.Index,
         offset: i65 = 0,
     },
+    addrx_sym: link.File.SymbolId,
+    constx_sym: link.File.SymbolId,
     wasm_ext: union(enum) {
         local: u32,
         global: u32,
@@ -356,11 +391,11 @@ pub const Loc = union(enum) {
         };
         switch (loc) {
             .empty => {},
-            .addr_reloc => |si| {
+            .addr_sym => |sym| {
                 try w.writeByte(DW.OP.addr);
                 switch (writer) {
                     .io => try dwarf.addrPlaceholder(w),
-                    .mf => |nw| try dwarf.addrSym(nw, si, 0),
+                    .mf => |nw| try dwarf.addrSym(nw, sym.si, sym.offset),
                 }
             },
             .deref => |addr| {
@@ -478,6 +513,14 @@ pub const Loc = union(enum) {
                     .mf => |nw| try dwarf.secOffset(nw, implicit_pointer.node, 0),
                 }
                 try w.writeSleb128(implicit_pointer.offset);
+            },
+            .addrx_sym => |si| {
+                try w.writeByte(DW.OP.addrx);
+                try dwarf.addrxSym(w, si);
+            },
+            .constx_sym => |si| {
+                try w.writeByte(DW.OP.constx);
+                try dwarf.addrxSym(w, si);
             },
             .wasm_ext => |wasm_ext| {
                 try w.writeByte(DW.OP.WASM_location);
@@ -731,14 +774,16 @@ pub const WipFunc = struct {
                 .@"extern", .@"export" => nav.name,
             }.toSlice(ip));
             try dwarf.refType(pt, di_nw, .fromInterned(func_type.return_type));
-            try dwarf.addrSym(di_nw, debug.wip_func.func_si, 0);
+            try dwarf.addrxSym(di_w, debug.wip_func.func_si);
             debug.info_func_length_offset = di_w.end;
             try di_w.writeInt(u32, undefined, dwarf.endian);
             try di_w.writeUleb128(
                 target_info.minFunctionAlignment(target).max(nav.resolved.?.@"align").toByteUnits().?,
             );
-            try di_w.writeByte(@intFromBool(decl.linkage != .normal));
-            try di_w.writeByte(@intFromBool(Type.fromInterned(func_type.return_type).isNoReturn(zcu)));
+            try di_w.writeAll(&.{
+                @intFromBool(decl.linkage != .normal),
+                @intFromBool(Type.fromInterned(func_type.return_type).isNoReturn(zcu)),
+            });
         }
 
         pub fn startDebugLine(debug: *Debug) link.Error!void {
@@ -1284,6 +1329,11 @@ pub fn init(lf: *link.File, format: DW.Format) Dwarf {
             .end = 0,
             .set = .empty,
         },
+        .debug_addr = .{
+            .ni = .none,
+            .pending_index = 0,
+            .map = .empty,
+        },
         .frame = .{
             .header = if (target.cpu.arch == .x86_64 and target.ofmt == .elf) header: {
                 dev.checkAny(&.{ .llvm_backend, .x86_64_backend });
@@ -1353,6 +1403,7 @@ pub fn deinit(dwarf: *Dwarf) void {
     dwarf.globals.deinit(gpa);
     dwarf.funcs.deinit(gpa);
     dwarf.decls.deinit(gpa);
+    dwarf.debug_addr.map.deinit(gpa);
     dwarf.debug_line_str.map.deinit(gpa);
     dwarf.debug_str.map.deinit(gpa);
     dwarf.debug_str_offsets.map.deinit(gpa);
@@ -1620,6 +1671,24 @@ pub fn genUnitPadding(dwarf: *Dwarf, w: *std.Io.Writer) std.Io.Writer.Error!void
     try w.writeInt(u16, 0, dwarf.endian);
 }
 
+pub fn genDebugAddrHeader(dwarf: *Dwarf, dah_w: *std.Io.Writer) std.Io.Writer.Error!void {
+    try dwarf.genUnitLength(dah_w);
+    try dah_w.writeInt(u16, 5, dwarf.endian);
+    try dah_w.writeAll(&.{ @backingInt(dwarf.address_size), 0 });
+    assert(dah_w.end == Addr.tableOffset(dwarf));
+}
+
+pub fn genPendingDebugAddr(dwarf: *Dwarf, da_nw: *link.MappedFile.Node.Writer) link.Error!void {
+    da_nw.interface.end = dwarf.debug_addr.size(dwarf);
+    for (dwarf.debug_addr.map.keys()[dwarf.debug_addr.pending_index..]) |si| {
+        dwarf.addrSym(da_nw, si, 0) catch |err| switch (err) {
+            else => |e| return e,
+            error.WriteFailed => return dwarf.reportWriteError(da_nw),
+        };
+        dwarf.debug_addr.pending_index += 1;
+    }
+}
+
 pub const EhFrameHdr = extern struct {
     version: u8,
     eh_frame_ptr_enc: std.dwarf.EH.PE,
@@ -1675,11 +1744,7 @@ pub fn genDebugFrameCie(
             const Register = @import("../codegen/x86_64/bits.zig").Register;
             switch (format) {
                 .eh_frame => try df_w.writeAll("zR\x00"),
-                .debug_frame => {
-                    try df_w.writeAll("\x00");
-                    try df_w.writeByte(@backingInt(dwarf.address_size));
-                    try df_w.writeByte(0);
-                },
+                .debug_frame => try df_w.writeAll("\x00" ++ .{ @backingInt(dwarf.address_size), 0 }),
             }
             try df_w.writeUleb128(dwarf.frame.header.code_alignment_factor);
             try df_w.writeSleb128(dwarf.frame.header.data_alignment_factor);
@@ -1726,8 +1791,7 @@ pub fn genDebugInfoHeader(
     if (!unit.alive) return dwarf.genUnitPadding(dih_w);
     try dwarf.genUnitLength(dih_w);
     try dih_w.writeInt(u16, 5, dwarf.endian);
-    try dih_w.writeByte(DW.UT.compile);
-    try dih_w.writeByte(@backingInt(dwarf.address_size));
+    try dih_w.writeAll(&.{ DW.UT.compile, @backingInt(dwarf.address_size) });
     try dwarf.secOffset(dih_nw, dwarf.debug_abbrev.ni.unwrap().?, 0);
     const compile_unit_offset = dih_w.end;
     try dwarf.abbrevCode(dih_nw, .compile_unit);
@@ -1738,6 +1802,7 @@ pub fn genDebugInfoHeader(
         compile_unit_offset,
     );
     try dwarf.secOffset(dih_nw, unit.debug_line_header_ni.unwrap().?, 0);
+    try dwarf.secOffset(dih_nw, dwarf.debug_addr.ni.unwrap().?, Addr.tableOffset(dwarf));
     try dwarf.secOffset(dih_nw, unit.debug_rnglists_ni.unwrap().?, Rnglists.tableOffset(dwarf));
     try dwarf.secOffset(dih_nw, dwarf.debug_str_offsets.ni.unwrap().?, StrOffsets.tableOffset(dwarf));
     try dwarf.strx1(dih_nw, "zig " ++ @import("build_options").version);
@@ -1818,8 +1883,7 @@ pub fn genDebugLineHeader(
     const dlh_w = &dlh_nw.interface;
     try dwarf.genUnitLength(dlh_w);
     try dlh_w.writeInt(u16, 5, dwarf.endian);
-    try dlh_w.writeByte(@backingInt(dwarf.address_size));
-    try dlh_w.writeByte(0);
+    try dlh_w.writeAll(&.{ @backingInt(dwarf.address_size), 0 });
     const header_length_offset = dlh_w.end;
     switch (dwarf.format) {
         .@"32" => try dlh_w.writeInt(u32, undefined, dwarf.endian),
@@ -1950,8 +2014,7 @@ pub fn genDebugRnglistsHeader(
     const drh_w = &drh_nw.interface;
     try dwarf.genUnitLength(drh_w);
     try drh_w.writeInt(u16, 5, dwarf.endian);
-    try drh_w.writeByte(@backingInt(dwarf.address_size));
-    try drh_w.writeByte(0);
+    try drh_w.writeAll(&.{ @backingInt(dwarf.address_size), 0 });
     try drh_w.writeInt(u32, 1, dwarf.endian);
     assert(drh_w.end == Rnglists.tableOffset(dwarf));
     switch (dwarf.format) {
@@ -1971,8 +2034,8 @@ pub fn genDebugRnglistsRange(
 ) link.EmitError!void {
     const dr_w = &dr_nw.interface;
     dr_w.end = unit.debug_rnglists_end;
-    try dr_w.writeByte(DW.RLE.start_length);
-    try dwarf.addrSym(dr_nw, func_si, 0);
+    try dr_w.writeByte(DW.RLE.startx_length);
+    try dwarf.addrxSym(dr_w, func_si);
     try dr_w.writeUleb128(func_length);
     unit.debug_rnglists_end = dr_w.end;
     try dr_w.writeByte(DW.RLE.end_of_list);
@@ -1986,9 +2049,10 @@ pub fn genDebugStrOffsetsHeader(dwarf: *Dwarf, dsoh_w: *std.Io.Writer) std.Io.Wr
 }
 
 pub fn genPendingDebugStrOffsets(dwarf: *Dwarf, dso_nw: *link.MappedFile.Node.Writer) link.Error!void {
+    const debug_str_ni = dwarf.debug_str.ni.unwrap().?;
     dso_nw.interface.end = dwarf.debug_str_offsets.size(dwarf);
     for (dwarf.debug_str_offsets.map.keys()[dwarf.debug_str_offsets.pending_index..]) |offset| {
-        dwarf.secOffset(dso_nw, dwarf.debug_str.ni.unwrap().?, offset) catch |err| switch (err) {
+        dwarf.secOffset(dso_nw, debug_str_ni, offset) catch |err| switch (err) {
             else => |e| return e,
             error.WriteFailed => return dwarf.reportWriteError(dso_nw),
         };
@@ -2081,7 +2145,7 @@ fn updateExternInner(
         if (func_type.is_var_args) try dwarf.abbrevCode(di_nw, .is_var_args);
         if (!is_empty) try di_w.writeUleb128(@backingInt(AbbrevCode.null));
     } else {
-        const addr: Loc = .{ .addr_reloc = si };
+        const addr: Loc = .{ .addr_sym = .{ .si = si } };
         const loc: Loc = if (nav_threadlocal) switch (arch) {
             .x86_64 => .{ .form_tls_address = &addr },
             else => unreachable,
@@ -2169,7 +2233,7 @@ fn updateGlobalInner(
         .@"extern" => unreachable,
         .@"export" => nav.name,
     }.toSlice(ip));
-    const addr: Loc = .{ .addr_reloc = si };
+    const addr: Loc = .{ .addr_sym = .{ .si = si } };
     const loc: Loc = if (nav_threadlocal) switch (arch) {
         .x86_64 => .{ .form_tls_address = &addr },
         else => unreachable,
@@ -4403,6 +4467,21 @@ fn addrSym(
         .absAddr(elf),
     ) else unreachable;
 }
+fn addrxSym(dwarf: *Dwarf, w: *std.Io.Writer, si: link.File.SymbolId) link.EmitError!void {
+    try w.writeUleb128(try dwarf.debug_addr.get(dwarf.lf.comp.gpa, si));
+}
+fn addrx1Sym(dwarf: *Dwarf, w: *std.Io.Writer, si: link.File.SymbolId) link.EmitError!void {
+    try w.writeByte(@intCast(try dwarf.debug_addr.get(dwarf.lf.comp.gpa, si)));
+}
+fn addrx2Sym(dwarf: *Dwarf, w: *std.Io.Writer, si: link.File.SymbolId) link.EmitError!void {
+    try w.writeInt(u16, @intCast(try dwarf.debug_addr.get(dwarf.lf.comp.gpa, si)), dwarf.endian);
+}
+fn addrx3Sym(dwarf: *Dwarf, w: *std.Io.Writer, si: link.File.SymbolId) link.EmitError!void {
+    try w.writeInt(u24, @intCast(try dwarf.debug_addr.get(dwarf.lf.comp.gpa, si)), dwarf.endian);
+}
+fn addrx4Sym(dwarf: *Dwarf, w: *std.Io.Writer, si: link.File.SymbolId) link.EmitError!void {
+    try w.writeInt(u32, @intCast(try dwarf.debug_addr.get(dwarf.lf.comp.gpa, si)), dwarf.endian);
+}
 
 fn blockConst(
     dwarf: *Dwarf,
@@ -5072,7 +5151,7 @@ pub const AbbrevCode = enum {
             .attrs = decl_attrs ++ .{
                 .{ .linkage_name, .strx },
                 .{ .type, .ref_addr },
-                .{ .low_pc, .addr },
+                .{ .low_pc, .addrx },
                 .{ .high_pc, .data4 },
                 .{ .alignment, .udata },
                 .{ .external, .flag },
@@ -5085,7 +5164,7 @@ pub const AbbrevCode = enum {
             .attrs = decl_attrs ++ .{
                 .{ .linkage_name, .strx },
                 .{ .type, .ref_addr },
-                .{ .low_pc, .addr },
+                .{ .low_pc, .addrx },
                 .{ .high_pc, .data4 },
                 .{ .alignment, .udata },
                 .{ .external, .flag },
@@ -5353,7 +5432,7 @@ pub const AbbrevCode = enum {
             .attrs = decl_instance_attrs ++ .{
                 .{ .linkage_name, .strx },
                 .{ .type, .ref_addr },
-                .{ .low_pc, .addr },
+                .{ .low_pc, .addrx },
                 .{ .high_pc, .data4 },
                 .{ .alignment, .udata },
                 .{ .external, .flag },
@@ -5366,7 +5445,7 @@ pub const AbbrevCode = enum {
             .attrs = decl_instance_attrs ++ .{
                 .{ .linkage_name, .strx },
                 .{ .type, .ref_addr },
-                .{ .low_pc, .addr },
+                .{ .low_pc, .addrx },
                 .{ .high_pc, .data4 },
                 .{ .alignment, .udata },
                 .{ .external, .flag },
@@ -6020,6 +6099,7 @@ pub const AbbrevCode = enum {
                 .{ .language, .data1 },
                 .{ .base_types, .ref_addr },
                 .{ .stmt_list, .sec_offset },
+                .{ .addr_base, .sec_offset },
                 .{ .rnglists_base, .sec_offset },
                 .{ .str_offsets_base, .sec_offset },
                 .{ .producer, .strx1 },
