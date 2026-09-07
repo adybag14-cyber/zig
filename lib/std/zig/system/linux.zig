@@ -71,97 +71,44 @@ const aarch64 = struct {
 const arm = struct {
     const cpuinfo = struct {
         const Impl = struct {
-            const num_cores = 4;
+            implementer: u8 = 0,
+            variant: u8 = 0,
+            part: u16 = 0,
 
-            cores: [num_cores]CoreInfo = undefined,
-            core_no: usize = 0,
-            have_fields: usize = 0,
-
-            const CoreInfo = struct {
-                architecture: u8 = 0,
-                implementer: u8 = 0,
-                variant: u8 = 0,
-                part: u16 = 0,
-                is_really_v6: bool = false,
-            };
+            have_fields: u8 = 0,
 
             const cpu_models = @import("arm.zig").cpu_models;
 
-            fn addOne(self: *Impl) void {
-                if (self.have_fields == 4 and self.core_no < num_cores) {
-                    if (self.core_no > 0) {
-                        // Deduplicate the core info.
-                        for (self.cores[0..self.core_no]) |it| {
-                            if (std.meta.eql(it, self.cores[self.core_no]))
-                                return;
-                        }
-                    }
-                    self.core_no += 1;
-                }
-            }
-
             fn lineHook(self: *Impl, key: []const u8, value: []const u8) !bool {
-                const info = &self.cores[self.core_no];
-
-                if (mem.eql(u8, key, "processor")) {
-                    // Handle both old-style and new-style cpuinfo formats.
-                    // The former prints a sequence of "processor: N" lines for each
-                    // core and then the info for the core that's executing this code(!)
-                    // while the latter prints the infos for each core right after the
-                    // "processor" key.
-                    self.have_fields = 0;
-                    self.cores[self.core_no] = .{};
-                } else if (mem.eql(u8, key, "CPU implementer")) {
-                    info.implementer = try fmt.parseInt(u8, value, 0);
-                    self.have_fields += 1;
-                } else if (mem.eql(u8, key, "CPU architecture")) {
-                    // "AArch64" on older kernels.
-                    info.architecture = if (mem.startsWith(u8, value, "AArch64"))
-                        8
-                    else
-                        try fmt.parseInt(u8, value, 0);
+                if (mem.eql(u8, key, "CPU implementer")) {
+                    self.implementer = try fmt.parseInt(u8, value, 0);
                     self.have_fields += 1;
                 } else if (mem.eql(u8, key, "CPU variant")) {
-                    info.variant = try fmt.parseInt(u8, value, 0);
+                    self.variant = try fmt.parseInt(u8, value, 0);
                     self.have_fields += 1;
                 } else if (mem.eql(u8, key, "CPU part")) {
-                    info.part = try fmt.parseInt(u16, value, 0);
+                    self.part = try fmt.parseInt(u16, value, 0);
                     self.have_fields += 1;
-                } else if (mem.eql(u8, key, "model name")) {
-                    // ARMv6 cores report "CPU architecture" equal to 7.
-                    if (mem.find(u8, value, "(v6l)")) |_| {
-                        info.is_really_v6 = true;
-                    }
                 } else if (mem.eql(u8, key, "CPU revision")) {
                     // This field is always the last one for each CPU section.
-                    _ = self.addOne();
+                    return false;
                 }
 
                 return true;
             }
 
             fn finalize(self: *Impl, arch: Target.Cpu.Arch) ?Target.Cpu {
-                if (self.core_no == 0) return null;
+                if (self.have_fields != 3) return null;
 
-                const is_64bit = switch (arch) {
-                    .aarch64, .aarch64_be => true,
-                    else => false,
-                };
+                const model = cpu_models.isKnown(.{
+                    .architecture = undefined, // unused for the lookup
+                    .implementer = self.implementer,
+                    .variant = self.variant,
+                    .part = self.part,
+                }, false) orelse return null;
 
-                var known_models: [num_cores]?*const Target.Cpu.Model = undefined;
-                for (self.cores[0..self.core_no], 0..) |core, i| {
-                    known_models[i] = cpu_models.isKnown(.{
-                        .architecture = core.architecture,
-                        .implementer = core.implementer,
-                        .variant = core.variant,
-                        .part = core.part,
-                    }, is_64bit);
-                }
-
-                // XXX We pick the first core on big.LITTLE systems, hopefully the
-                // LITTLE one.
-                const model = known_models[0] orelse return null;
-                return Target.Cpu{
+                // We pick the first core on big.LITTLE systems, hopefully the LITTLE one.
+                return .{
                     .arch = arch,
                     .model = model,
                     .features = model.features,
@@ -205,7 +152,7 @@ const arm = struct {
             \\CPU part : 0xc0f
             \\CPU revision : 3
         );
-        try testParser(cpuinfo.Parser, .aarch64, &Target.aarch64.cpu.cortex_a72,
+        try testParser(cpuinfo.Parser, .arm, &Target.arm.cpu.cortex_a72,
             \\processor       : 0
             \\BogoMIPS        : 108.00
             \\Features        : fp asimd evtstrm crc32 cpuid
