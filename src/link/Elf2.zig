@@ -215,6 +215,7 @@ textrel_count: u32,
 
 dwarf: Dwarf,
 dwarf_shared: std.enums.EnumArray(Dwarf.SharedSection, dwarf_relocs.Shared),
+dwarf_str_offsets: dwarf_relocs.StrOffsets,
 dwarf_units: []dwarf_relocs.Unit,
 dwarf_consts: std.array_hash_map.Auto(link.ConstPool.Index, dwarf_relocs.Const),
 dwarf_globals: std.ArrayList(dwarf_relocs.Global),
@@ -287,6 +288,7 @@ const Node = union(enum) {
 
     debug_shared: Dwarf.SharedSection,
     eh_frame_footer,
+    debug_str_offsets,
     unit_padding,
     unit_frame: Dwarf.Unit.Index,
     unit_frame_cie: Dwarf.Unit.Index,
@@ -880,6 +882,10 @@ const dwarf_relocs = struct {
     const Shared = struct {
         first_target_reloc: NodeReloc.Index,
     };
+    const StrOffsets = struct {
+        first_target_reloc: NodeReloc.Index,
+        node_relocs: std.ArrayList(NodeReloc.Index),
+    };
     const Unit = struct {
         frame_cie_first_target_reloc: NodeReloc.Index,
         debug_info_header_first_target_reloc: NodeReloc.Index,
@@ -887,7 +893,7 @@ const dwarf_relocs = struct {
         debug_line_header_first_target_reloc: NodeReloc.Index,
         debug_line_header_first_node_reloc: NodeReloc.Index,
         debug_rnglists_first_target_reloc: NodeReloc.Index,
-        debug_rnglists_symbol_relocs: std.array_hash_map.Auto(SymbolReloc.Index, void),
+        debug_rnglists_symbol_relocs: std.ArrayList(SymbolReloc.Index),
     };
     const Const = struct {
         debug_info_first_target_reloc: NodeReloc.Index,
@@ -3347,6 +3353,7 @@ pub fn symbolForAtom(elf: *Elf, atom: link.File.AtomId) link.File.SymbolId {
         .copied_global,
         .debug_shared,
         .eh_frame_footer,
+        .debug_str_offsets,
         .unit_padding,
         .unit_frame,
         .unit_frame_cie,
@@ -3866,6 +3873,10 @@ fn create(
         .dwarf_shared = comptime .initFill(.{
             .first_target_reloc = .none,
         }),
+        .dwarf_str_offsets = .{
+            .first_target_reloc = .none,
+            .node_relocs = .empty,
+        },
         .dwarf_units = &.{},
         .dwarf_consts = .empty,
         .dwarf_globals = .empty,
@@ -3921,6 +3932,7 @@ pub fn deinit(elf: *Elf) void {
     elf.changed_symtab_index.deinit(gpa);
 
     elf.dwarf.deinit();
+    elf.dwarf_str_offsets.node_relocs.deinit(gpa);
     for (elf.dwarf_units) |*dwarf_unit| dwarf_unit.debug_rnglists_symbol_relocs.deinit(gpa);
     gpa.free(elf.dwarf_units);
     elf.dwarf_consts.deinit(gpa);
@@ -5132,6 +5144,8 @@ fn initHeaders(
             });
             elf.shndx.debug_str_offsets = try elf.addSection(elf.ni.elf, .{
                 .name = ".debug_str_offsets",
+                .addralign = addr_align,
+                .node_align = elf.mf.flags.block_size,
             });
         },
         .code_view => unreachable,
@@ -5227,6 +5241,7 @@ fn getNodeShndx(elf: *const Elf, ni: MappedFile.Node.Index) Section.Index {
         .lazy_const_data,
         .debug_shared,
         .eh_frame_footer,
+        .debug_str_offsets,
         .unit_padding,
         .unit_frame,
         .unit_debug_info,
@@ -5274,6 +5289,7 @@ fn getNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
         => |i| Symbol.Id.local(i.symbol(elf)).value(elf),
         .debug_shared,
         .eh_frame_footer,
+        .debug_str_offsets,
         .unit_padding,
         .unit_frame,
         .unit_frame_cie,
@@ -5313,7 +5329,7 @@ fn computeNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
         .lazy_code,
         .lazy_const_data,
         => |i| Symbol.Id.local(i.symbol(elf)).value(elf),
-        .debug_shared, .eh_frame_footer, .unit_padding => unreachable,
+        .debug_shared, .eh_frame_footer, .debug_str_offsets, .unit_padding => unreachable,
         .unit_frame, .unit_debug_info, .unit_debug_line => {
             const section_offset, _ = parent_ni.location(&elf.mf).resolve(&elf.mf);
             break :parent_vaddr elf.getNodeShndx(parent_ni).vaddr(elf) + section_offset;
@@ -5350,7 +5366,7 @@ fn computeNodeSectionOffset(elf: *Elf, ni: MappedFile.Node.Index) u64 {
         .section, .section_manual_size => 0,
         .input_section, .copied_global => unreachable,
         .nav, .uav, .lazy_code, .lazy_const_data => unreachable,
-        .debug_shared, .eh_frame_footer, .unit_padding => unreachable,
+        .debug_shared, .eh_frame_footer, .debug_str_offsets, .unit_padding => unreachable,
         .unit_frame, .unit_debug_info, .unit_debug_line => {
             const parent_section_offset, _ = parent_ni.location(&elf.mf).resolve(&elf.mf);
             break :parent_section_offset parent_section_offset;
@@ -5400,6 +5416,7 @@ pub fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
         .copied_global,
         .debug_shared,
         .eh_frame_footer,
+        .debug_str_offsets,
         .unit_padding,
         .unit_frame,
         .unit_frame_cie,
@@ -7163,8 +7180,8 @@ fn updateInitFiniArraySectionSize(
 }
 
 pub fn prelink(elf: *Elf, prog_node: std.Progress.Node) link.Error!void {
-    const sub_prog_node = prog_node.start("ELF Prelink", 0);
-    defer sub_prog_node.end();
+    const prelink_prog_node = prog_node.start("ELF Prelink", 0);
+    defer prelink_prog_node.end();
 
     const diags = &elf.base.comp.link_diags;
     elf.prelinkInner() catch |err| switch (err) {
@@ -7198,45 +7215,14 @@ fn prelinkInner(elf: *Elf) Error!void {
         };
         elf.input_pending_index += 1;
 
-        try elf.nodes.ensureUnusedCapacity(gpa, 4 + 5);
-
-        switch (elf.shndx.debug_abbrev) {
-            .UNDEF => {},
-            else => |debug_abbrev_shndx| elf.dwarf.debug_abbrev.ni = .wrap(elf.addNodeAssumeCapacity(
-                try debug_abbrev_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
-                .{ .debug_shared = .debug_abbrev },
-            )),
-        }
-        switch (elf.shndx.debug_line_str) {
-            .UNDEF => {},
-            else => |debug_line_str_shndx| elf.dwarf.debug_line_str.ni =
-                .wrap(elf.addNodeAssumeCapacity(
-                    try debug_line_str_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
-                    .{ .debug_shared = .debug_line_str },
-                )),
-        }
-        switch (elf.shndx.debug_str) {
-            .UNDEF => {},
-            else => |debug_str_shndx| elf.dwarf.debug_str.ni = .wrap(elf.addNodeAssumeCapacity(
-                try debug_str_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
-                .{ .debug_shared = .debug_str },
-            )),
-        }
-        switch (elf.shndx.debug_str_offsets) {
-            .UNDEF => {},
-            else => |debug_str_offsets_shndx| elf.dwarf.debug_str_offsets.ni =
-                .wrap(elf.addNodeAssumeCapacity(
-                    try debug_str_offsets_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
-                    .{ .debug_shared = .debug_str_offsets },
-                )),
-        }
-
-        for ([5]Section.Index{
+        try elf.nodes.ensureUnusedCapacity(gpa, 6 + 4);
+        for ([6]Section.Index{
             elf.shndx.eh_frame,
             elf.shndx.debug_frame,
             elf.shndx.debug_info,
             elf.shndx.debug_line,
             elf.shndx.debug_rnglists,
+            elf.shndx.debug_str_offsets,
         }) |debug_shndx| {
             if (debug_shndx == .UNDEF) continue;
             const debug_ni = debug_shndx.get(elf).ni;
@@ -7271,6 +7257,53 @@ fn prelinkInner(elf: *Elf) Error!void {
                 elf.dwarf.genUnitPadding(&debug_nw.interface)) catch |err| switch (err) {
                 error.WriteFailed => return debug_nw.err.?,
             };
+        }
+        switch (elf.shndx.debug_abbrev) {
+            .UNDEF => {},
+            else => |debug_abbrev_shndx| elf.dwarf.debug_abbrev.ni = .wrap(elf.addNodeAssumeCapacity(
+                try debug_abbrev_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+                .{ .debug_shared = .debug_abbrev },
+            )),
+        }
+        switch (elf.shndx.debug_line_str) {
+            .UNDEF => {},
+            else => |debug_line_str_shndx| elf.dwarf.debug_line_str.ni =
+                .wrap(elf.addNodeAssumeCapacity(
+                    try debug_line_str_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+                    .{ .debug_shared = .debug_line_str },
+                )),
+        }
+        switch (elf.shndx.debug_str) {
+            .UNDEF => {},
+            else => |debug_str_shndx| elf.dwarf.debug_str.ni = .wrap(elf.addNodeAssumeCapacity(
+                try debug_str_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+                .{ .debug_shared = .debug_str },
+            )),
+        }
+        switch (elf.shndx.debug_str_offsets) {
+            .UNDEF => {},
+            else => |debug_str_offsets_shndx| {
+                const debug_str_offsets_ni = elf.addNodeAssumeCapacity(
+                    try debug_str_offsets_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
+                        .alignment = switch (elf.dwarf.format) {
+                            .@"32" => .@"4",
+                            .@"64" => .@"8",
+                        },
+                        .next_moved = true,
+                        .enable_next_moved = true,
+                    }),
+                    .debug_str_offsets,
+                );
+                elf.dwarf.debug_str_offsets.ni = .wrap(debug_str_offsets_ni);
+
+                var dsoh_nw: link.MappedFile.Node.Writer = undefined;
+                debug_str_offsets_ni.writer(gpa, &elf.mf, &dsoh_nw);
+                defer dsoh_nw.deinit();
+                elf.dwarf.genDebugStrOffsetsHeader(&dsoh_nw.interface) catch |err| switch (err) {
+                    else => |e| return e,
+                    error.WriteFailed => return dsoh_nw.err.?,
+                };
+            },
         }
     }
 }
@@ -7397,6 +7430,7 @@ fn zcuFilesReadyInner(elf: *Elf, zcu: *Zcu) Error!void {
             error.WriteFailed => return dih_nw.err.?,
         };
     }
+    try elf.genPendingDebugStrings(gpa);
 }
 
 fn flushFiles(elf: *Elf) Error!void {
@@ -8221,6 +8255,7 @@ fn addNodeRelocAssumeCapacity(
     const first_target_reloc = switch (elf.getNode(target)) {
         else => unreachable,
         .debug_shared => |ss| &elf.dwarf_shared.getPtr(ss).first_target_reloc,
+        .debug_str_offsets => &elf.dwarf_str_offsets.first_target_reloc,
         .unit_frame_cie => |ui| &elf.dwarf_units[@backingInt(ui)].frame_cie_first_target_reloc,
         .unit_debug_info_header => |ui| &elf.dwarf_units[@backingInt(ui)].debug_info_header_first_target_reloc,
         .unit_debug_line_header => |ui| &elf.dwarf_units[@backingInt(ui)].debug_line_header_first_target_reloc,
@@ -8327,6 +8362,7 @@ fn addGotRelocAssumeCapacity(
         .copied_global,
         .debug_shared,
         .eh_frame_footer,
+        .debug_str_offsets,
         .unit_padding,
         .unit_frame,
         .unit_frame_cie,
@@ -9049,10 +9085,12 @@ fn updateFuncInner(
                 const unit = debug.wip_func.unit.get(debug.wip_func.dwarf);
                 {
                     var dr_nw: MappedFile.Node.Writer = undefined;
-                    unit.debug_rnglists_ni.unwrap().?.writer(gpa, &elf.mf, &dr_nw);
+                    const debug_rnglists_ni = unit.debug_rnglists_ni.unwrap().?;
+                    try debug_rnglists_ni.moved(gpa, &elf.mf);
+                    debug_rnglists_ni.writer(gpa, &elf.mf, &dr_nw);
                     defer dr_nw.deinit();
-                    const first_symbol_reloc = elf.symbol_relocs.items.len;
-                    debug.wip_func.dwarf.genDebugRnglists(
+                    const first_symbol_ri = elf.symbol_relocs.items.len;
+                    debug.wip_func.dwarf.genDebugRnglistsRange(
                         unit,
                         &dr_nw,
                         debug.wip_func.func_si,
@@ -9064,12 +9102,9 @@ fn updateFuncInner(
                     const symbol_relocs = &elf.dwarf_units[@backingInt(debug.wip_func.unit)]
                         .debug_rnglists_symbol_relocs;
                     try symbol_relocs.ensureUnusedCapacity(gpa, elf.symbol_relocs.items.len -
-                        first_symbol_reloc);
-                    for (first_symbol_reloc..elf.symbol_relocs.items.len) |symbol_ri|
-                        symbol_relocs.putAssumeCapacityNoClobber(
-                            @fromBackingInt(@intCast(symbol_ri)),
-                            {},
-                        );
+                        first_symbol_ri);
+                    for (first_symbol_ri..elf.symbol_relocs.items.len) |symbol_ri|
+                        symbol_relocs.appendAssumeCapacity(@fromBackingInt(@intCast(symbol_ri)));
                 }
                 debug.wip_func.finishDebugFrameFde(func_length);
                 if (func.analysisUnordered(ip).inferred_error_set) {
@@ -9153,8 +9188,8 @@ fn flushInner(
     const diags = &comp.link_diags;
     _ = arena;
 
-    const sub_prog_node = prog_node.start("ELF Flush", 0);
-    defer sub_prog_node.end();
+    const flush_prog_node = prog_node.start("ELF Flush", 0);
+    defer flush_prog_node.end();
 
     try elf.flushFiles();
 
@@ -9172,8 +9207,11 @@ fn flushInner(
 
     while (try elf.idle(tid)) {}
 
+    assert(elf.input_pending_index == elf.inputs.items.len);
+    assert(elf.input_section_pending_index == elf.input_sections.items.len);
     assert(elf.pending_uavs.items.len == 0);
     assert(elf.dwarf.const_pool.pending.items.len == 0);
+    assert(elf.dwarf.debug_str_offsets.pending_index == elf.dwarf.debug_str_offsets.map.count());
 
     // We've done the final `idle` loop, so everything is at its final place in the file. We have a
     // few more things to check and write now that addresses and offsets are finalized.
@@ -9237,22 +9275,24 @@ pub fn idle(elf: *Elf, tid: Zcu.PerThread.Id) link.Error!bool {
     assert(elf.dwarf.const_pool.pending.items.len == 0);
 
     task: {
-        if (elf.input_pending_index < elf.inputs.items.len) {
+        if (elf.inputs.items.len - elf.input_pending_index > 0) {
             const ii: Node.InputIndex = @fromBackingInt(elf.input_pending_index);
             elf.input_pending_index += 1;
-            const sub_prog_node = elf.idleProgNode(tid, elf.input_prog_node, elf.getNode(ii.node(elf)));
-            defer sub_prog_node.end();
+            const idle_prog_node =
+                elf.startIdleProgress(tid, elf.input_prog_node, elf.getNode(ii.node(elf)));
+            defer idle_prog_node.end();
             elf.flushInput(ii) catch |err| switch (err) {
                 else => |e| return e,
                 error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
             };
             break :task;
         }
-        if (elf.input_section_pending_index < elf.input_sections.items.len) {
+        if (elf.input_sections.items.len - elf.input_section_pending_index > 0) {
             const isi: InputSection.Index = @fromBackingInt(elf.input_section_pending_index);
             elf.input_section_pending_index += 1;
-            const sub_prog_node = elf.idleProgNode(tid, elf.input_prog_node, elf.getNode(isi.node(elf)));
-            defer sub_prog_node.end();
+            const idle_prog_node =
+                elf.startIdleProgress(tid, elf.input_prog_node, elf.getNode(isi.node(elf)));
+            defer idle_prog_node.end();
             elf.flushInputSection(isi) catch |err| switch (err) {
                 else => |e| return e,
                 error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
@@ -9279,8 +9319,8 @@ pub fn idle(elf: *Elf, tid: Zcu.PerThread.Id) link.Error!bool {
             break :task;
         }
         if (elf.changed_symtab_index.pop()) |kv| {
-            const sub_prog_node = elf.mf.update_prog_node.start(kv.key.slice(elf), 0);
-            defer sub_prog_node.end();
+            const idle_prog_node = elf.mf.update_prog_node.start(kv.key.slice(elf), 0);
+            defer idle_prog_node.end();
 
             const global_name = kv.key;
             const global = elf.globalByName(global_name).?;
@@ -9359,22 +9399,23 @@ pub fn idle(elf: *Elf, tid: Zcu.PerThread.Id) link.Error!bool {
             const clean_resized = ni.cleanResized(&elf.mf);
             const clean_next_moved = ni.cleanNextMoved(&elf.mf);
             if (!clean_moved and !clean_resized and !clean_next_moved) continue;
-            const sub_prog_node = elf.idleProgNode(tid, elf.mf.update_prog_node, elf.getNode(ni));
-            defer sub_prog_node.end();
+            const idle_prog_node = elf.startIdleProgress(tid, elf.mf.update_prog_node, elf.getNode(ni));
+            defer idle_prog_node.end();
             if (clean_moved) try elf.flushMoved(ni);
             if (clean_resized) try elf.flushResized(ni);
             if (clean_moved or clean_resized or clean_next_moved) try elf.flushPadding(ni);
             break :task;
         }
     }
-    if (elf.input_sections.items.len > elf.input_section_pending_index) return true;
+    if (elf.inputs.items.len - elf.input_pending_index > 0) return true;
+    if (elf.input_sections.items.len - elf.input_section_pending_index > 0) return true;
     if (elf.one_shot_fixups.items.len > 0) return true;
     if (elf.changed_symtab_index.count() > 0) return true;
     if (elf.mf.updates.items.len > 0) return true;
     return false;
 }
 
-fn idleProgNode(
+fn startIdleProgress(
     elf: *Elf,
     tid: Zcu.PerThread.Id,
     prog_node: std.Progress.Node,
@@ -9405,7 +9446,7 @@ fn idleProgNode(
         }) catch &name,
         .debug_shared => |ss| switch (ss) {
             .debug_abbrev => "debug info abbrevs",
-            .debug_str, .debug_str_offsets => "debug info strings",
+            .debug_str => "debug info strings",
             .debug_line_str => "line info strings",
         },
         .unit_frame,
@@ -9474,28 +9515,42 @@ fn genPending(elf: *Elf, pt: Zcu.PerThread) link.Error!void {
         try elf.genUav(pt, umi);
     }
     var lazy_it = elf.lazy.iterator();
-    while (lazy_it.next()) |lazy| while (lazy.value.pending_index < lazy.value.map.count()) {
+    while (lazy_it.next()) |lazy| while (lazy.value.map.count() - lazy.value.pending_index > 0) {
         try elf.genLazy(pt, .{ .kind = lazy.key, .index = lazy.value.pending_index });
         lazy.value.pending_index += 1;
     };
+    const gpa = elf.base.comp.gpa;
     switch (elf.base.comp.config.debug_format) {
         .strip => {},
-        .dwarf => {
-            const gpa = elf.base.comp.gpa;
-            while (true) {
-                const pending = elf.dwarf.pending_decl;
-                if (pending.instance == .none) break;
-                elf.dwarf.pending_decl = .{ .di = undefined, .instance = .none };
-                const debug_info_ni = pending.di.get(&elf.dwarf).debug_info_ni.unwrap().?;
-                try debug_info_ni.moved(gpa, &elf.mf);
-                var di_nw: MappedFile.Node.Writer = undefined;
-                debug_info_ni.writer(gpa, &elf.mf, &di_nw);
-                defer di_nw.deinit();
-                elf.resetNodeRelocs(debug_info_ni);
-                try elf.dwarf.genDecl(pt, &di_nw, pending.instance);
-            }
+        .dwarf => while (true) {
+            const pending = elf.dwarf.pending_decl;
+            if (pending.instance == .none) break;
+            elf.dwarf.pending_decl = .{ .di = undefined, .instance = .none };
+            const debug_info_ni = pending.di.get(&elf.dwarf).debug_info_ni.unwrap().?;
+            try debug_info_ni.moved(gpa, &elf.mf);
+            var di_nw: MappedFile.Node.Writer = undefined;
+            debug_info_ni.writer(gpa, &elf.mf, &di_nw);
+            defer di_nw.deinit();
+            elf.resetNodeRelocs(debug_info_ni);
+            try elf.dwarf.genDecl(pt, &di_nw, pending.instance);
         },
         .code_view => unreachable,
+    }
+    try elf.genPendingDebugStrings(gpa);
+}
+fn genPendingDebugStrings(elf: *Elf, gpa: std.mem.Allocator) link.Error!void {
+    while (elf.dwarf.debug_str_offsets.map.count() - elf.dwarf.debug_str_offsets.pending_index > 0) {
+        const debug_str_offsets_ni = elf.dwarf.debug_str_offsets.ni.unwrap().?;
+        try debug_str_offsets_ni.moved(gpa, &elf.mf);
+        var dso_nw: link.MappedFile.Node.Writer = undefined;
+        debug_str_offsets_ni.writer(gpa, &elf.mf, &dso_nw);
+        defer dso_nw.deinit();
+        const first_node_ri = elf.node_relocs.items.len;
+        try elf.dwarf.genPendingDebugStrOffsets(&dso_nw);
+        const node_relocs = &elf.dwarf_str_offsets.node_relocs;
+        try node_relocs.ensureUnusedCapacity(gpa, elf.node_relocs.items.len - first_node_ri);
+        for (first_node_ri..elf.node_relocs.items.len) |node_ri|
+            node_relocs.appendAssumeCapacity(@fromBackingInt(@intCast(node_ri)));
     }
 }
 
@@ -9897,7 +9952,28 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 target_ri = target_reloc.next;
             }
         },
-        .eh_frame_footer, .unit_padding, .unit_frame, .unit_debug_info, .unit_debug_line => {},
+        .eh_frame_footer,
+        .unit_padding,
+        .unit_frame,
+        .unit_debug_info,
+        .unit_debug_line,
+        => {},
+        .debug_str_offsets => {
+            const target_section_offset = elf.computeNodeSectionOffset(ni);
+            var target_ri = elf.dwarf_str_offsets.first_target_reloc;
+            while (target_ri != .none) {
+                const target_reloc = target_ri.get(elf);
+                assert(target_reloc.target == ni);
+                target_reloc.flushMovedTarget(elf, target_section_offset);
+                target_ri = target_reloc.next;
+            }
+            const node_vaddr = elf.computeNodeVAddr(ni);
+            for (elf.dwarf_str_offsets.node_relocs.items) |node_ri| {
+                const node_reloc = node_ri.get(elf);
+                assert(node_reloc.node.unwrap().? == ni);
+                node_reloc.flushMovedNode(elf, node_vaddr);
+            }
+        },
         .unit_frame_cie => |ui| {
             const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = elf.dwarf_units[@backingInt(ui)].frame_cie_first_target_reloc;
@@ -9948,7 +10024,7 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 target_ri = target_reloc.next;
             }
             const node_vaddr = elf.computeNodeVAddr(ni);
-            for (dwarf_unit.debug_rnglists_symbol_relocs.keys()) |symbol_ri| {
+            for (dwarf_unit.debug_rnglists_symbol_relocs.items) |symbol_ri| {
                 const symbol_reloc = symbol_ri.get(elf);
                 assert(symbol_reloc.node.unwrap().? == ni);
                 symbol_reloc.flushMovedNode(elf, node_vaddr);
@@ -10281,6 +10357,7 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
         .lazy_const_data,
         .debug_shared,
         .eh_frame_footer,
+        .debug_str_offsets,
         .unit_padding,
         .unit_frame,
         .unit_frame_cie,
@@ -10304,7 +10381,8 @@ fn flushPadding(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
     const trace = tracy.trace(@src());
     defer trace.end();
 
-    switch (elf.getNode(ni)) {
+    const node = elf.getNode(ni);
+    switch (node) {
         .deleted => unreachable,
         .archive,
         .archive_input_member,
@@ -10352,6 +10430,7 @@ fn flushPadding(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
                 error.NoSpaceLeft => archive.strtab_member_too_big = true,
             }
         },
+        .debug_str_offsets,
         .unit_padding,
         .unit_frame_cie,
         .unit_debug_info_header,
@@ -10363,8 +10442,26 @@ fn flushPadding(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
         .func_debug_info,
         .func_debug_line,
         .decl_debug_info,
-        => |_, tag| {
-            const offset, const size = ni.location(&elf.mf).resolve(&elf.mf);
+        => {
+            const offset, const size = location: {
+                const offset, const size = ni.location(&elf.mf).resolve(&elf.mf);
+                break :location .{ offset, switch (node) {
+                    else => unreachable,
+                    .debug_str_offsets => elf.dwarf.debug_str_offsets.size(&elf.dwarf),
+                    .unit_padding,
+                    .unit_frame_cie,
+                    .unit_debug_info_header,
+                    .unit_debug_line_header,
+                    .const_debug_info,
+                    .global_debug_info,
+                    .func_frame_fde,
+                    .func_debug_info,
+                    .func_debug_line,
+                    .decl_debug_info,
+                    => size,
+                    .unit_debug_rnglists => |ui| Dwarf.Rnglists.size(&elf.dwarf, ui),
+                } };
+            };
             const parent_ni = ni.parent(&elf.mf).unwrap().?;
             const slice = slice: {
                 if (ni.next(&elf.mf).unwrap()) |next_ni| switch (next_ni.position(&elf.mf)) {
@@ -10376,9 +10473,9 @@ fn flushPadding(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
                         break :slice parent_slice[@intCast(offset)..@intCast(next_offset)];
                     },
                 };
-                switch (tag) {
+                switch (node) {
                     else => unreachable,
-                    .unit_padding, .unit_debug_rnglists => {
+                    .debug_str_offsets, .unit_padding, .unit_debug_rnglists => {
                         const parent_slice = parent_ni.slicePadding(&elf.mf);
                         const frame_shndx = elf.getNodeShndx(parent_ni);
                         const frame_format = frame_shndx.debugFrameFormat(elf) orelse
@@ -10453,7 +10550,7 @@ fn flushPadding(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
                             break :buffer debug_slice[@intCast(parent_offset)..];
                         });
                         fw.end = @intCast(offset + size);
-                        switch (tag) {
+                        switch (node) {
                             else => unreachable,
                             .unit_debug_info_header,
                             .const_debug_info,
@@ -10470,7 +10567,7 @@ fn flushPadding(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
                             error.WriteFailed => {
                                 fw.end = unit_padding_offset;
                                 elf.dwarf.updateUnitLength(fw.buffer, fw.buffer.len);
-                                switch (tag) {
+                                switch (node) {
                                     else => unreachable,
                                     .unit_debug_info_header,
                                     .const_debug_info,
@@ -10501,8 +10598,23 @@ fn flushPadding(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
                 }
             };
             var fw: Io.Writer = .fixed(slice[@intCast(size)..]);
-            switch (tag) {
+            switch (node) {
                 else => unreachable,
+                .debug_str_offsets, .unit_debug_rnglists => {
+                    elf.dwarf.genUnitPadding(&fw) catch |err| switch (err) {
+                        error.WriteFailed => {
+                            elf.dwarf.updateUnitLength(slice, slice.len);
+                            @memset(fw.buffer, switch (node) {
+                                else => unreachable,
+                                .debug_str_offsets => std.math.maxInt(u8),
+                                .unit_debug_rnglists => std.dwarf.RLE.end_of_list,
+                            });
+                            return;
+                        },
+                    };
+                    elf.dwarf.updateUnitLength(slice, size);
+                    elf.dwarf.updateUnitLength(fw.buffer, fw.buffer.len);
+                },
                 .unit_padding => elf.dwarf.updateUnitLength(slice, slice.len),
                 .unit_frame_cie, .func_frame_fde => {
                     elf.dwarf.updateUnitLength(slice, slice.len);
@@ -10517,17 +10629,6 @@ fn flushPadding(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
                 .unit_debug_line_header,
                 .func_debug_line,
                 => Dwarf.genDebugLinePadding(&fw, fw.buffer.len) catch unreachable,
-                .unit_debug_rnglists => {
-                    elf.dwarf.genUnitPadding(&fw) catch |err| switch (err) {
-                        error.WriteFailed => {
-                            elf.dwarf.updateUnitLength(slice, slice.len);
-                            @memset(fw.buffer, std.dwarf.RLE.end_of_list);
-                            return;
-                        },
-                    };
-                    elf.dwarf.updateUnitLength(slice, size);
-                    elf.dwarf.updateUnitLength(fw.buffer, fw.buffer.len);
-                },
             }
         },
         .unit_frame, .unit_debug_info, .unit_debug_line => {
