@@ -347,6 +347,114 @@ const m68k = struct {
     }
 };
 
+const mips = struct {
+    const cpuinfo = struct {
+        const Impl = struct {
+            model: ?*const Target.Cpu.Model = null,
+
+            const cpu_names = .{
+                .{ "Cavium Octeon III", &Target.mips.cpu.@"octeon+" },
+                .{ "Cavium Octeon II", &Target.mips.cpu.@"octeon+" },
+                .{ "Cavium Octeon+", &Target.mips.cpu.@"octeon+" },
+                .{ "Cavium Octeon", &Target.mips.cpu.octeon },
+                .{ "MIPS I6400", &Target.mips.cpu.i6400 },
+                .{ "MIPS I6500", &Target.mips.cpu.i6500 },
+                .{ "MIPS P5600", &Target.mips.cpu.p5600 },
+                .{ "R3000A", &Target.mips.cpu.r3000a },
+            };
+
+            const isa_names = .{
+                .{ "mips64r6", &Target.mips.cpu.mips64r6 },
+                .{ "mips64r5", &Target.mips.cpu.mips64r5 },
+                .{ "mips64r2", &Target.mips.cpu.mips64r2 },
+                .{ "mips64r1", &Target.mips.cpu.mips64 },
+                .{ "mips32r6", &Target.mips.cpu.mips32r6 },
+                .{ "mips32r5", &Target.mips.cpu.mips32r5 },
+                .{ "mips32r2", &Target.mips.cpu.mips32r2 },
+                .{ "mips32r1", &Target.mips.cpu.mips32 },
+                .{ "mips5", &Target.mips.cpu.mips5 },
+                .{ "mips4", &Target.mips.cpu.mips4 },
+                .{ "mips3", &Target.mips.cpu.mips3 },
+                .{ "mips2", &Target.mips.cpu.mips2 },
+                .{ "mips1", &Target.mips.cpu.mips1 },
+            };
+
+            fn lineHook(self: *Impl, key: []const u8, value: []const u8) !bool {
+                // The `cpu model` line always comes before `isa`, which is perfect for us since we
+                // want the explicit model to take precedence over the generic ISA identifier.
+                if (mem.eql(u8, key, "cpu model")) {
+                    inline for (cpu_names) |pair| {
+                        if (mem.find(u8, value, pair[0]) != null) {
+                            self.model = pair[1];
+                            return false;
+                        }
+                    }
+                } else if (mem.eql(u8, key, "isa")) {
+                    inline for (isa_names) |pair| {
+                        if (mem.find(u8, value, pair[0]) != null) {
+                            self.model = pair[1];
+                            break;
+                        }
+                    }
+
+                    // If we haven't found anything useful by here, we we may as well stop.
+                    return false;
+                }
+
+                return true;
+            }
+
+            fn finalize(self: *const Impl, arch: Target.Cpu.Arch) ?Target.Cpu {
+                const model = self.model orelse return null;
+                return .{
+                    .arch = arch,
+                    .model = model,
+                    .features = model.features,
+                };
+            }
+        };
+
+        const Parser = CpuinfoParser(Impl);
+    };
+
+    test cpuinfo {
+        try testParser(cpuinfo.Parser, .mips64, &Target.mips.cpu.@"octeon+",
+            \\system type             : UBNT_E300
+            \\machine                 : Unknown
+            \\processor               : 0
+            \\cpu model               : Cavium Octeon III V0.2  FPU V0.0
+            \\BogoMIPS                : 2000.00
+            \\wait instruction        : yes
+            \\microsecond timers      : yes
+            \\tlb_entries             : 256
+            \\extra interrupt vector  : yes
+            \\hardware watchpoint     : yes, count: 2, address/irw mask: [0x0ffc, 0x0ffb]
+            \\isa                     : mips1 mips2 mips3 mips4 mips5 mips64r2
+            \\ASEs implemented        : vz
+            \\shadow register sets    : 1
+            \\kscratch registers      : 4
+            \\package                 : 0
+            \\core                    : 0
+            \\VCED exceptions         : not available
+            \\VCEI exceptions         : not available
+        );
+    }
+
+    pub fn detectNativeCpu(io: Io, arch: Target.Cpu.Arch) ?Target.Cpu {
+        var file = Io.Dir.openFileAbsolute(io, "/proc/cpuinfo", .{}) catch return null;
+        defer file.close(io);
+
+        var buffer: [4096]u8 = undefined;
+        var file_reader = file.reader(io, &buffer);
+
+        var cpu = (cpuinfo.Parser.parse(arch, &file_reader.interface) catch null) orelse return null;
+
+        cpu.features.populateDependencies(cpu.arch.allFeaturesList());
+
+        return cpu;
+    }
+};
+
 const powerpc = struct {
     const cpuinfo = struct {
         const Impl = struct {
@@ -874,6 +982,7 @@ pub fn detectNativeCpuAndFeatures(io: Io) ?Target.Cpu {
         .arm, .armeb, .thumb, .thumbeb => arm.detectNativeCpu(io, current_arch),
         .csky => csky.detectNativeCpu(io, current_arch),
         .m68k => m68k.detectNativeCpu(io, current_arch),
+        .mips, .mipsel, .mips64, .mips64el => mips.detectNativeCpu(io, current_arch),
         .powerpc, .powerpcle, .powerpc64, .powerpc64le => powerpc.detectNativeCpu(io, current_arch),
         .riscv64, .riscv32 => riscv.detectNativeCpuAndFeatures(io, current_arch),
         .s390x => s390x.detectNativeCpu(io, current_arch),
