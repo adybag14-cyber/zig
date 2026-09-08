@@ -2897,43 +2897,52 @@ fn updateConstInner(
             const loaded_struct = ip.loadStructType(@"const");
             const src_inst = loaded_struct.zir_index.resolveFull(ip).?;
             const zf = zcu.fileByIndex(src_inst.file);
+            const is_empty = loaded_struct.captures.len == 0 and loaded_struct.field_types.len == 0;
             if (src_inst.inst == .main_struct_inst) {
                 assert(loaded_struct.captures.len == 0);
                 const ui = dwarf.getUnit(zf.mod.?);
                 _, const fi = try ui.get(dwarf).getFile(zcu.gpa, ui, src_inst.file);
                 try dwarf.abbrevCode(di_nw, switch (loaded_struct.layout) {
-                    .auto => if (loaded_struct.field_types.len > 0) .file else .empty_file,
+                    .auto => if (is_empty) .empty_file else .file,
                     .@"extern", .@"packed" => unreachable,
                 });
                 try di_w.writeUleb128(@backingInt(fi));
                 try dwarf.strx(di_nw, loaded_struct.name.toSlice(ip));
             } else if (loaded_struct.captures.len > 0 or loaded_struct.is_reified) {
-                try dwarf.abbrevCode(di_nw, if (loaded_struct.captures.len > 0 or
-                    loaded_struct.field_types.len > 0) switch (loaded_struct.layout) {
-                    .auto, .@"extern" => .decl_instance_struct,
-                    .@"packed" => .decl_instance_packed_struct,
-                } else switch (loaded_struct.layout) {
-                    .auto, .@"extern" => .decl_instance_empty_struct,
-                    .@"packed" => .decl_instance_empty_packed_struct,
+                try dwarf.abbrevCode(di_nw, switch (loaded_struct.name_nav) {
+                    else => if (is_empty) switch (loaded_struct.layout) {
+                        .auto, .@"extern" => .decl_instance_empty_struct,
+                        .@"packed" => .decl_instance_empty_packed_struct,
+                    } else switch (loaded_struct.layout) {
+                        .auto, .@"extern" => .decl_instance_struct,
+                        .@"packed" => .decl_instance_packed_struct,
+                    },
+                    .none => if (is_empty) switch (loaded_struct.layout) {
+                        .auto, .@"extern" => .type_decl_instance_empty_struct,
+                        .@"packed" => .type_decl_instance_empty_packed_struct,
+                    } else switch (loaded_struct.layout) {
+                        .auto, .@"extern" => .type_decl_instance_struct,
+                        .@"packed" => .type_decl_instance_packed_struct,
+                    },
                 });
                 try dwarf.refType(pt, di_nw, .fromInterned(ip.namespacePtr(
                     ip.namespacePtr(loaded_struct.namespace).parent.unwrap().?,
                 ).owner_type));
                 try dwarf.secOffset(di_nw, try dwarf.getConstDecl(pt, @"const"), 0);
+                if (loaded_struct.name_nav == .none)
+                    try dwarf.strx(di_nw, loaded_struct.name.toSlice(ip));
             } else if (loaded_struct.name_nav.unwrap()) |name_ni| {
                 const name_nav = ip.getNav(name_ni);
                 const decl = zf.zir.?.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
                 const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
                     name_nav.analysis.?.namespace,
                 ).owner_type);
-                try dwarf.abbrevCode(di_nw, if (loaded_struct.field_types.len > 0)
-                    switch (loaded_struct.layout) {
-                        .auto, .@"extern" => .decl_struct,
-                        .@"packed" => .decl_packed_struct,
-                    }
-                else switch (loaded_struct.layout) {
+                try dwarf.abbrevCode(di_nw, if (is_empty) switch (loaded_struct.layout) {
                     .auto, .@"extern" => .decl_empty_struct,
                     .@"packed" => .decl_empty_packed_struct,
+                } else switch (loaded_struct.layout) {
+                    .auto, .@"extern" => .decl_struct,
+                    .@"packed" => .decl_packed_struct,
                 });
                 try dwarf.secOffset(di_nw, parent_ni, 0);
                 try di_w.writeInt(u32, decl.src_line + 1, dwarf.endian);
@@ -2945,14 +2954,12 @@ fn updateConstInner(
                 const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
                     ip.namespacePtr(loaded_struct.namespace).parent.unwrap().?,
                 ).owner_type);
-                try dwarf.abbrevCode(di_nw, if (loaded_struct.field_types.len > 0)
-                    switch (loaded_struct.layout) {
-                        .auto, .@"extern" => .type_decl_struct,
-                        .@"packed" => .type_decl_packed_struct,
-                    }
-                else switch (loaded_struct.layout) {
+                try dwarf.abbrevCode(di_nw, if (is_empty) switch (loaded_struct.layout) {
                     .auto, .@"extern" => .type_decl_empty_struct,
                     .@"packed" => .type_decl_empty_packed_struct,
+                } else switch (loaded_struct.layout) {
+                    .auto, .@"extern" => .type_decl_struct,
+                    .@"packed" => .type_decl_packed_struct,
                 });
                 try dwarf.secOffset(di_nw, parent_ni, 0);
                 try di_w.writeInt(u32, decl.src_line + 1, dwarf.endian);
@@ -3033,41 +3040,49 @@ fn updateConstInner(
                     }
                 },
             }
-            if (loaded_struct.captures.len > 0 or loaded_struct.field_types.len > 0)
-                try di_w.writeUleb128(@backingInt(AbbrevCode.null));
+            if (!is_empty) try di_w.writeUleb128(@backingInt(AbbrevCode.null));
         },
         .union_type => {
             const loaded_union = ip.loadUnionType(@"const");
             const loaded_tag = ip.loadEnumType(loaded_union.enum_tag_type);
             const zfi = loaded_union.zir_index.resolveFile(ip);
             const zf = zcu.fileByIndex(zfi);
+            const is_empty = loaded_union.captures.len == 0 and loaded_union.field_types.len == 0;
             if (loaded_union.captures.len > 0 or loaded_union.is_reified) {
-                try dwarf.abbrevCode(di_nw, if (loaded_union.captures.len > 0 or
-                    loaded_union.field_types.len > 0) switch (loaded_union.layout) {
-                    .auto, .@"extern" => .decl_instance_union,
-                    .@"packed" => .decl_instance_packed_union,
-                } else switch (loaded_union.layout) {
-                    .auto, .@"extern" => .decl_instance_empty_union,
-                    .@"packed" => .decl_instance_empty_packed_union,
+                try dwarf.abbrevCode(di_nw, switch (loaded_union.name_nav) {
+                    else => if (is_empty) switch (loaded_union.layout) {
+                        .auto, .@"extern" => .decl_instance_empty_union,
+                        .@"packed" => .decl_instance_empty_packed_union,
+                    } else switch (loaded_union.layout) {
+                        .auto, .@"extern" => .decl_instance_union,
+                        .@"packed" => .decl_instance_packed_union,
+                    },
+                    .none => if (is_empty) switch (loaded_union.layout) {
+                        .auto, .@"extern" => .type_decl_instance_empty_union,
+                        .@"packed" => .type_decl_instance_empty_packed_union,
+                    } else switch (loaded_union.layout) {
+                        .auto, .@"extern" => .type_decl_instance_union,
+                        .@"packed" => .type_decl_instance_packed_union,
+                    },
                 });
                 try dwarf.refType(pt, di_nw, .fromInterned(ip.namespacePtr(
                     ip.namespacePtr(loaded_union.namespace).parent.unwrap().?,
                 ).owner_type));
                 try dwarf.secOffset(di_nw, try dwarf.getConstDecl(pt, @"const"), 0);
+                if (loaded_union.name_nav == .none)
+                    try dwarf.strx(di_nw, loaded_union.name.toSlice(ip));
             } else if (loaded_union.name_nav.unwrap()) |name_ni| {
                 const name_nav = ip.getNav(name_ni);
                 const decl = zf.zir.?.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
                 const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
                     name_nav.analysis.?.namespace,
                 ).owner_type);
-                try dwarf.abbrevCode(di_nw, if (loaded_union.field_types.len > 0)
-                    switch (loaded_union.layout) {
-                        .auto, .@"extern" => .decl_union,
-                        .@"packed" => .decl_packed_union,
-                    }
-                else switch (loaded_union.layout) {
+                try dwarf.abbrevCode(di_nw, if (is_empty) switch (loaded_union.layout) {
                     .auto, .@"extern" => .decl_empty_union,
                     .@"packed" => .decl_empty_packed_union,
+                } else switch (loaded_union.layout) {
+                    .auto, .@"extern" => .decl_union,
+                    .@"packed" => .decl_packed_union,
                 });
                 try dwarf.secOffset(di_nw, parent_ni, 0);
                 try di_w.writeInt(u32, decl.src_line + 1, dwarf.endian);
@@ -3079,14 +3094,12 @@ fn updateConstInner(
                 const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
                     ip.namespacePtr(loaded_union.namespace).parent.unwrap().?,
                 ).owner_type);
-                try dwarf.abbrevCode(di_nw, if (loaded_union.field_types.len > 0)
-                    switch (loaded_union.layout) {
-                        .auto, .@"extern" => .type_decl_union,
-                        .@"packed" => .type_decl_packed_union,
-                    }
-                else switch (loaded_union.layout) {
+                try dwarf.abbrevCode(di_nw, if (is_empty) switch (loaded_union.layout) {
                     .auto, .@"extern" => .type_decl_empty_union,
                     .@"packed" => .type_decl_empty_packed_union,
+                } else switch (loaded_union.layout) {
+                    .auto, .@"extern" => .type_decl_union,
+                    .@"packed" => .type_decl_packed_union,
                 });
                 try dwarf.secOffset(di_nw, parent_ni, 0);
                 try di_w.writeInt(u32, decl.src_line + 1, dwarf.endian);
@@ -3169,26 +3182,30 @@ fn updateConstInner(
                     }
                 },
             }
-            if (loaded_union.captures.len > 0 or loaded_union.field_types.len > 0)
-                try di_w.writeUleb128(@backingInt(AbbrevCode.null));
+            if (!is_empty) try di_w.writeUleb128(@backingInt(AbbrevCode.null));
         },
         .enum_type => {
             const loaded_enum = ip.loadEnumType(@"const");
+            const is_empty = loaded_enum.captures.len == 0 and loaded_enum.field_names.len == 0;
             switch (loaded_enum.owner_union) {
                 .none => {
                     const zfi = loaded_enum.zir_index.unwrap().?.resolveFile(ip);
                     const zf = zcu.fileByIndex(zfi);
                     const zir = &zf.zir.?;
                     if (loaded_enum.captures.len > 0 or loaded_enum.is_reified) {
-                        try dwarf.abbrevCode(di_nw, if (loaded_enum.captures.len > 0 or
-                            loaded_enum.field_names.len > 0)
-                            .decl_instance_enum
-                        else
-                            .decl_instance_empty_enum);
+                        try dwarf.abbrevCode(di_nw, switch (loaded_enum.name_nav) {
+                            else => if (is_empty) .decl_instance_empty_enum else .decl_instance_enum,
+                            .none => if (is_empty)
+                                .type_decl_instance_empty_enum
+                            else
+                                .type_decl_instance_enum,
+                        });
                         try dwarf.refType(pt, di_nw, .fromInterned(ip.namespacePtr(
                             ip.namespacePtr(loaded_enum.namespace).parent.unwrap().?,
                         ).owner_type));
                         try dwarf.secOffset(di_nw, try dwarf.getConstDecl(pt, @"const"), 0);
+                        if (loaded_enum.name_nav == .none)
+                            try dwarf.strx(di_nw, loaded_enum.name.toSlice(ip));
                     } else if (loaded_enum.name_nav.unwrap()) |name_ni| {
                         const name_nav = ip.getNav(name_ni);
                         const decl = zir.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
@@ -3197,7 +3214,7 @@ fn updateConstInner(
                         ).owner_type);
                         try dwarf.abbrevCode(
                             di_nw,
-                            if (loaded_enum.field_names.len > 0) .decl_enum else .decl_empty_enum,
+                            if (is_empty) .decl_empty_enum else .decl_enum,
                         );
                         try dwarf.secOffset(di_nw, parent_ni, 0);
                         try di_w.writeInt(u32, decl.src_line + 1, dwarf.endian);
@@ -3209,10 +3226,10 @@ fn updateConstInner(
                         const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
                             ip.namespacePtr(loaded_enum.namespace).parent.unwrap().?,
                         ).owner_type);
-                        try dwarf.abbrevCode(di_nw, if (loaded_enum.field_names.len > 0)
-                            .type_decl_enum
-                        else
-                            .type_decl_empty_enum);
+                        try dwarf.abbrevCode(
+                            di_nw,
+                            if (is_empty) .type_decl_empty_enum else .type_decl_enum,
+                        );
                         try dwarf.secOffset(di_nw, parent_ni, 0);
                         try di_w.writeInt(u32, decl.src_line + 1, dwarf.endian);
                         try di_w.writeUleb128(decl.src_column + 1);
@@ -3220,10 +3237,10 @@ fn updateConstInner(
                     }
                 },
                 else => {
-                    try dwarf.abbrevCode(di_nw, if (loaded_enum.field_names.len > 0)
-                        .generated_enum_type
-                    else
-                        .generated_empty_enum_type);
+                    try dwarf.abbrevCode(
+                        di_nw,
+                        if (is_empty) .generated_empty_enum_type else .generated_enum_type,
+                    );
                     try dwarf.strx(di_nw, loaded_enum.fqn.toSlice(ip));
                 },
             }
@@ -3234,8 +3251,7 @@ fn updateConstInner(
                 try dwarf.enumConstValue(di_w, loaded_enum, field_index);
                 try dwarf.strx(di_nw, loaded_enum.field_names.get(ip)[field_index].toSlice(ip));
             }
-            if (loaded_enum.captures.len > 0 or loaded_enum.field_names.len > 0)
-                try di_w.writeUleb128(@backingInt(AbbrevCode.null));
+            if (!is_empty) try di_w.writeUleb128(@backingInt(AbbrevCode.null));
         },
         // no defined size, so lowered the same as incomplete struct types
         .opaque_type => return dwarf.updateConstIncompleteInner(pt, di_nw, @"const"),
@@ -4151,7 +4167,7 @@ fn genDeclInner(
     done: switch (instance) {
         .none => unreachable,
         .@"const" => |@"const"| {
-            const kind: enum { @"struct", @"union", @"enum" }, const zf, const src_line, const src_column, const capture_names, const captures, const name, const maybe_name_nav, const namespace = container: switch (ip.indexToKey(instance.@"const")) {
+            const kind: enum { @"struct", @"union", @"enum" }, const zf, const src_line, const src_column, const capture_names, const captures, const maybe_name_nav, const namespace = container: switch (ip.indexToKey(instance.@"const")) {
                 else => unreachable,
                 .struct_type => {
                     const loaded_struct = ip.loadStructType(@"const");
@@ -4200,7 +4216,6 @@ fn genDeclInner(
                         src_column,
                         capture_names,
                         loaded_struct.captures,
-                        loaded_struct.name,
                         loaded_struct.name_nav,
                         loaded_struct.namespace,
                     };
@@ -4238,7 +4253,6 @@ fn genDeclInner(
                         src_column,
                         capture_names,
                         loaded_union.captures,
-                        loaded_union.name,
                         loaded_union.name_nav,
                         loaded_union.namespace,
                     };
@@ -4276,7 +4290,6 @@ fn genDeclInner(
                         src_column,
                         capture_names,
                         loaded_enum.captures,
-                        loaded_enum.name,
                         loaded_enum.name_nav,
                         loaded_enum.namespace,
                     };
@@ -4296,7 +4309,6 @@ fn genDeclInner(
                         decl.src_column,
                         decl.capture_names,
                         loaded_opaque.captures,
-                        loaded_opaque.name,
                         loaded_opaque.name_nav,
                         loaded_opaque.namespace,
                     };
@@ -4340,7 +4352,7 @@ fn genDeclInner(
                 try di_w.writeInt(u32, decl.src_line + 1, dwarf.endian);
                 try di_w.writeUleb128(decl.src_column + 1);
                 try di_w.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
-                try dwarf.strx(di_nw, name.toSlice(ip));
+                try dwarf.strx(di_nw, name_nav.name.toSlice(ip));
             } else {
                 const parent_ni = try dwarf.getConstDecl(pt, ip.namespacePtr(
                     ip.namespacePtr(namespace).parent.unwrap().?,
@@ -4357,7 +4369,6 @@ fn genDeclInner(
                 try dwarf.secOffset(di_nw, parent_ni, 0);
                 try di_w.writeInt(u32, src_line + 1, dwarf.endian);
                 try di_w.writeUleb128(src_column + 1);
-                try dwarf.strx(di_nw, name.toSlice(ip));
             }
             for (capture_names, captures.get(ip)) |capture_name, capture| {
                 try dwarf.abbrevCode(di_nw, .capture_specification);
@@ -4409,9 +4420,12 @@ pub fn updateLineNumber(
 ) void {
     const di = dwarf.getDeclIfExists(inst) orelse return;
     const decl_ni = di.get(dwarf).debug_info_ni.unwrap().?;
+    comptime assert(AbbrevCode.common_decl_attrs[0][1] == .ref_addr);
+    comptime assert(AbbrevCode.common_decl_attrs[1][0] == .decl_line);
+    comptime assert(AbbrevCode.common_decl_attrs[1][1] == .data4);
     std.mem.writeInt(
         u32,
-        decl_ni.slice(mf)[AbbrevCode.decl_size..][0..4],
+        decl_ni.slice(mf)[AbbrevCode.decl_size + dwarf.secOffsetSize() ..][0..4],
         line + 1,
         dwarf.endian,
     );
@@ -4806,18 +4820,28 @@ pub const AbbrevCode = enum {
     decl_instance_incomplete_enum,
     decl_instance_empty_enum,
     decl_instance_enum,
+    type_decl_instance_empty_enum,
+    type_decl_instance_enum,
     decl_instance_empty_incomplete_struct,
     decl_instance_incomplete_struct,
     decl_instance_empty_struct,
     decl_instance_struct,
+    type_decl_instance_empty_struct,
+    type_decl_instance_struct,
     decl_instance_empty_packed_struct,
     decl_instance_packed_struct,
+    type_decl_instance_empty_packed_struct,
+    type_decl_instance_packed_struct,
     decl_instance_empty_incomplete_union,
     decl_instance_incomplete_union,
     decl_instance_empty_union,
     decl_instance_union,
+    type_decl_instance_empty_union,
+    type_decl_instance_union,
     decl_instance_empty_packed_union,
     decl_instance_packed_union,
+    type_decl_instance_empty_packed_union,
+    type_decl_instance_packed_union,
     decl_instance_type,
     decl_instance_const,
     decl_instance_const_fully_runtime,
@@ -4926,28 +4950,30 @@ pub const AbbrevCode = enum {
         DeclValEnum(DW.AT),
         DeclValEnum(DW.FORM),
     };
-    const decl_attrs = &[_]Attr{
+    const common_decl_attrs = &[_]Attr{
         .{ .ZIG_parent, .ref_addr },
         .{ .decl_line, .data4 },
         .{ .decl_column, .udata },
+    };
+    const decl_attrs = common_decl_attrs ++ .{
         .{ .accessibility, .data1 },
         .{ .name, .strx },
     };
-    const type_decl_attrs = &[_]Attr{
-        .{ .ZIG_parent, .ref_addr },
-        .{ .decl_line, .data4 },
-        .{ .decl_column, .udata },
+    const type_decl_attrs = common_decl_attrs ++ .{
         .{ .name, .strx },
     };
     const decl_specification_attrs = decl_attrs ++ &[_]Attr{
         .{ .declaration, .flag_present },
     };
-    const type_decl_specification_attrs = type_decl_attrs ++ &[_]Attr{
+    const type_decl_specification_attrs = common_decl_attrs ++ &[_]Attr{
         .{ .declaration, .flag_present },
     };
     const decl_instance_attrs = &[_]Attr{
         .{ .ZIG_parent, .ref_addr },
         .{ .specification, .ref_addr },
+    };
+    const type_decl_instance_attrs = decl_instance_attrs ++ .{
+        .{ .name, .strx },
     };
 
     const abbrevs = std.EnumArray(AbbrevCode, struct {
@@ -5367,6 +5393,19 @@ pub const AbbrevCode = enum {
                 .{ .type, .ref_addr },
             },
         },
+        .type_decl_instance_empty_enum = .{
+            .tag = .enumeration_type,
+            .attrs = type_decl_instance_attrs ++ .{
+                .{ .type, .ref_addr },
+            },
+        },
+        .type_decl_instance_enum = .{
+            .tag = .enumeration_type,
+            .children = true,
+            .attrs = type_decl_instance_attrs ++ .{
+                .{ .type, .ref_addr },
+            },
+        },
         .decl_instance_empty_incomplete_struct = .{
             .tag = .structure_type,
             .attrs = decl_instance_attrs,
@@ -5391,6 +5430,21 @@ pub const AbbrevCode = enum {
                 .{ .alignment, .udata },
             },
         },
+        .type_decl_instance_empty_struct = .{
+            .tag = .structure_type,
+            .attrs = type_decl_instance_attrs ++ .{
+                .{ .byte_size, .udata },
+                .{ .alignment, .udata },
+            },
+        },
+        .type_decl_instance_struct = .{
+            .tag = .structure_type,
+            .children = true,
+            .attrs = type_decl_instance_attrs ++ .{
+                .{ .byte_size, .udata },
+                .{ .alignment, .udata },
+            },
+        },
         .decl_instance_empty_packed_struct = .{
             .tag = .structure_type,
             .attrs = decl_instance_attrs ++ .{
@@ -5401,6 +5455,19 @@ pub const AbbrevCode = enum {
             .tag = .structure_type,
             .children = true,
             .attrs = decl_instance_attrs ++ .{
+                .{ .type, .ref_addr },
+            },
+        },
+        .type_decl_instance_empty_packed_struct = .{
+            .tag = .structure_type,
+            .attrs = type_decl_instance_attrs ++ .{
+                .{ .type, .ref_addr },
+            },
+        },
+        .type_decl_instance_packed_struct = .{
+            .tag = .structure_type,
+            .children = true,
+            .attrs = type_decl_instance_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },
@@ -5428,6 +5495,21 @@ pub const AbbrevCode = enum {
                 .{ .alignment, .udata },
             },
         },
+        .type_decl_instance_empty_union = .{
+            .tag = .union_type,
+            .attrs = type_decl_instance_attrs ++ .{
+                .{ .byte_size, .udata },
+                .{ .alignment, .udata },
+            },
+        },
+        .type_decl_instance_union = .{
+            .tag = .union_type,
+            .children = true,
+            .attrs = type_decl_instance_attrs ++ .{
+                .{ .byte_size, .udata },
+                .{ .alignment, .udata },
+            },
+        },
         .decl_instance_empty_packed_union = .{
             .tag = .union_type,
             .attrs = decl_instance_attrs ++ .{
@@ -5438,6 +5520,19 @@ pub const AbbrevCode = enum {
             .tag = .union_type,
             .children = true,
             .attrs = decl_instance_attrs ++ .{
+                .{ .type, .ref_addr },
+            },
+        },
+        .type_decl_instance_empty_packed_union = .{
+            .tag = .union_type,
+            .attrs = type_decl_instance_attrs ++ .{
+                .{ .type, .ref_addr },
+            },
+        },
+        .type_decl_instance_packed_union = .{
+            .tag = .union_type,
+            .children = true,
+            .attrs = type_decl_instance_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },

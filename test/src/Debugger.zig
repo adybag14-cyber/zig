@@ -2308,7 +2308,7 @@ pub fn addTests(db: *Debugger) void {
             \\(lldb) breakpoint delete --force 1
             \\1 breakpoints deleted; 0 breakpoint locations disabled.
         },
-        .{ .skip_new_linker = true },
+        .{},
     );
 }
 
