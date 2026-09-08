@@ -8982,8 +8982,7 @@ fn updateFuncInner(
         const debug_output: link.File.DebugInfoOutput, const dwarf_func = debug_output: {
             if (elf.ehdrMachine() != .X86_64) break :debug_output .{ .none, undefined };
             const dwarf = &elf.dwarf;
-            const src_inst = nav.srcInst(ip);
-            const mod = zcu.fileByIndex(src_inst.resolveFile(ip)).mod.?;
+            const mod = zcu.fileByIndex(nav.srcInst(ip).resolveFile(ip)).mod.?;
             if (mod.strip and mod.unwind_tables == .none) break :debug_output .{ .none, undefined };
 
             try elf.nodes.ensureUnusedCapacity(gpa, 4);
@@ -9063,15 +9062,10 @@ fn updateFuncInner(
             if (mod.strip) break :debug_output .{ .{ .eh_frame = wip_func }, dwarf_func };
 
             const debug = &debug_output_buf;
-            debug.pt = pt;
-            debug.empty = true;
-            debug.blocks = .empty;
+            debug.init(pt);
             dwarf_func.state = .resolved;
 
             const debug_info_ni = dwarf_func.debug_info_ni.unwrap().?;
-            try dwarf.decls.put(zcu.comp.gpa, src_inst, .{
-                .debug_info_ni = debug_info_ni.toOptional(),
-            });
             try debug_info_ni.moved(gpa, &elf.mf);
             debug_info_ni.writer(gpa, &elf.mf, &debug.info_writer);
 
