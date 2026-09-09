@@ -5,20 +5,21 @@
 set -x
 set -e
 
-ZIGDIR="$PWD"
 TARGET="aarch64-macos-none"
 MCPU="baseline"
 CACHE_BASENAME="zig+llvm+lld+clang-$TARGET-0.17.0-dev.203+073889523"
 PREFIX="$HOME/$CACHE_BASENAME"
 ZIG="$PREFIX/bin/zig"
 
+ZIGDIR="$PWD"
 if [ ! -d "$PREFIX" ]; then
   cd $HOME
   curl -L -O "https://ziglang.org/deps/$CACHE_BASENAME.tar.xz"
   tar xf "$CACHE_BASENAME.tar.xz"
 fi
-
 cd $ZIGDIR
+
+export PATH="$HOME/local/bin:$PATH"
 
 # Override the cache directories because they won't actually help other CI runs
 # which will be testing alternate versions of zig, and ultimately would just

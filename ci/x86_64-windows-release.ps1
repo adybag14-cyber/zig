@@ -4,6 +4,8 @@ $PREFIX_PATH = "$($Env:USERPROFILE)\deps\zig+llvm+lld+clang-$TARGET-0.17.0-dev.2
 $ZIG = "$PREFIX_PATH\bin\zig.exe"
 $ZSF_MAX_RSS = if ($Env:ZSF_MAX_RSS) { $Env:ZSF_MAX_RSS } else { 0 }
 
+$Env:PATH = "$($Env:USERPROFILE)\local\bin;$Env:PATH"
+
 function CheckLastExitCode {
     if (!$?) {
         exit 1

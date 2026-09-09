@@ -11,6 +11,8 @@ CACHE_BASENAME="zig+llvm+lld+clang-$TARGET-0.17.0-dev.2030+f955266cf"
 PREFIX="$HOME/deps/$CACHE_BASENAME"
 ZIG="$PREFIX/bin/zig"
 
+export PATH="$HOME/local/bin:$PATH"
+
 # Override the cache directories because they won't actually help other CI runs
 # which will be testing alternate versions of zig, and ultimately would just
 # fill up space on the hard drive for no reason.
