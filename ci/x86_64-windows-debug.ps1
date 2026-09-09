@@ -18,7 +18,7 @@ $Env:ZIG_GLOBAL_CACHE_DIR="$(Get-Location)\zig-global-cache"
 $Env:ZIG_LOCAL_CACHE_DIR="$(Get-Location)\zig-local-cache"
 
 Write-Output "Building from source..."
-New-Item -Path 'build-debug' -ItemType Directory
+New-Item -Force -Path 'build-debug' -ItemType Directory
 Set-Location -Path 'build-debug'
 
 # CMake gives a syntax error when file paths with backward slashes are used.

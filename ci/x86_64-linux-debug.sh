@@ -19,7 +19,7 @@ export PATH="$HOME/deps/wasmtime-v46.0.1-x86_64-linux:$HOME/deps/qemu-linux-x86_
 export ZIG_GLOBAL_CACHE_DIR="$PWD/zig-global-cache"
 export ZIG_LOCAL_CACHE_DIR="$PWD/zig-local-cache"
 
-mkdir build-debug
+mkdir -p build-debug
 cd build-debug
 
 export CC="$ZIG cc -target $TARGET -mcpu=$MCPU"

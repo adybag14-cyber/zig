@@ -25,7 +25,7 @@ cc -o bootstrap bootstrap.c
 ./zig2 build -Dno-lib
 ./zig-out/bin/zig test test/behavior.zig
 
-mkdir build-release
+mkdir -p build-release
 cd build-release
 
 export CC="$ZIG cc -target $TARGET -mcpu=$MCPU"
@@ -94,7 +94,7 @@ diff stage3-release/bin/zig stage4-release/bin/zig
 # Ensure that updating the wasm binary from this commit will result in a viable build.
 stage3-release/bin/zig build update-zig1
 
-mkdir ../build-new
+mkdir -p ../build-new
 cd ../build-new
 
 export CC="$ZIG cc -target $TARGET -mcpu=$MCPU"

@@ -17,7 +17,7 @@ ZIG="$PREFIX/bin/zig"
 export ZIG_GLOBAL_CACHE_DIR="$PWD/zig-global-cache"
 export ZIG_LOCAL_CACHE_DIR="$PWD/zig-local-cache"
 
-mkdir build-debug
+mkdir -p build-debug
 cd build-debug
 
 export CC="$ZIG cc -target $TARGET -mcpu=$MCPU"
