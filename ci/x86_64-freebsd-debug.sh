@@ -57,6 +57,7 @@ stage3-debug/bin/zig build \
   -Denable-llvm \
   -Dno-lib \
   -Dtarget=$TARGET \
+  -Dcpu=$MCPU \
   -Duse-zig-libcxx \
   -Dversion-string="$(stage3-debug/bin/zig version)"
 

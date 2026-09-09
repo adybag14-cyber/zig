@@ -60,6 +60,7 @@ stage3-release/bin/zig build \
   -Doptimize=ReleaseFast \
   -Dstrip \
   -Dtarget=$TARGET \
+  -Dcpu=$MCPU \
   -Duse-zig-libcxx \
   -Dversion-string="$(stage3-release/bin/zig version)"
 
