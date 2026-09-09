@@ -47,7 +47,7 @@ CheckLastExitCode
 $Env:ZIG_LIB_DIR="$(Get-Location)\..\lib"
 
 Write-Output "Main test suite..."
-stage3-debug\bin\zig build test docs `
+stage3-debug\bin\zig.exe build test docs `
   --maxrss $ZSF_MAX_RSS `
   --search-prefix "$PREFIX_PATH" `
   -Dstatic-llvm `
@@ -58,7 +58,7 @@ stage3-debug\bin\zig build test docs `
 CheckLastExitCode
 
 Write-Output "Build x86_64-windows-msvc behavior tests using the C backend..."
-stage3-debug\bin\zig build-obj `
+stage3-debug\bin\zig.exe build-obj `
   -ofmt=c `
   -OReleaseSmall `
   --name compiler_rt `
@@ -68,7 +68,7 @@ stage3-debug\bin\zig build-obj `
   ..\lib\compiler_rt.zig
 CheckLastExitCode
 
-stage3-debug\bin\zig test `
+stage3-debug\bin\zig.exe test `
   -ofmt=c `
   -femit-bin="behavior-x86_64-windows-msvc.c" `
   --test-no-exec `

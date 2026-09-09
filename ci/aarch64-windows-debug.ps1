@@ -47,7 +47,7 @@ CheckLastExitCode
 $Env:ZIG_LIB_DIR="$(Get-Location)\..\lib"
 
 Write-Output "Main test suite..."
-stage3-debug\bin\zig build test docs `
+stage3-debug\bin\zig.exe build test docs `
   --maxrss $ZSF_MAX_RSS `
   --search-prefix "$PREFIX_PATH" `
   -Dstatic-llvm `

@@ -75,7 +75,7 @@ stage3-release\bin\zig.exe build `
   -Dtarget="$TARGET" `
   -Dcpu="$MCPU" `
   -Duse-zig-libcxx `
-  -Dversion-string="$(stage3-release\bin\zig version)"
+  -Dversion-string="$(stage3-release\bin\zig.exe version)"
 CheckLastExitCode
 
 # Compare-Object returns an error code if the files differ.
