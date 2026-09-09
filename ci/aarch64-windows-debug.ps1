@@ -56,3 +56,18 @@ stage3-debug\bin\zig.exe build test docs `
   -Denable-symlinks-windows `
   --test-timeout 30m
 CheckLastExitCode
+
+Write-Output "Build and test stage4..."
+stage3-debug\bin\zig.exe build `
+  --prefix stage4-debug `
+  -Denable-llvm `
+  -Dno-lib `
+  -Doptimize=Debug `
+  -Dtarget="$TARGET" `
+  -Dcpu="$MCPU" `
+  -Duse-zig-libcxx `
+  -Dversion-string="$(stage3-debug\bin\zig.exe version)"
+CheckLastExitCode
+
+stage4-debug\bin\zig.exe test ..\test\behavior.zig
+CheckLastExitCode
