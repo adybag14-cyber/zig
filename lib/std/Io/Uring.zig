@@ -4510,6 +4510,20 @@ fn setUpChild(sync: *CancelRegion.Sync, options: struct {
     PATH: []const u8,
     spawn: process.SpawnOptions,
 }) ForkBailError {
+    // Must happen before clobbering file descriptors below.
+    switch (options.spawn.cwd) {
+        .inherit => {},
+        .dir => |cwd_dir| try fchdir(sync, cwd_dir.handle),
+        .path => |cwd_path| {
+            var cwd_path_buffer: [PATH_MAX]u8 = undefined;
+            const cwd_path_posix = try pathToPosix(cwd_path, &cwd_path_buffer);
+            try chdir(sync, cwd_path_posix);
+        },
+    }
+
+    for (options.spawn.inherit_dirs) |dir| try setFdFlags(sync, dir.handle, 0);
+    for (options.spawn.inherit_files) |file| try setFdFlags(sync, file.handle, 0);
+
     try setUpChildIo(
         sync,
         options.spawn.stdin,
@@ -4532,22 +4546,14 @@ fn setUpChild(sync: *CancelRegion.Sync, options: struct {
         options.dev_null_fd,
     );
 
-    switch (options.spawn.cwd) {
-        .inherit => {},
-        .dir => |cwd_dir| try fchdir(sync, cwd_dir.handle),
-        .path => |cwd_path| {
-            var cwd_path_buffer: [PATH_MAX]u8 = undefined;
-            const cwd_path_posix = try pathToPosix(cwd_path, &cwd_path_buffer);
-            try chdir(sync, cwd_path_posix);
-        },
+    // Must happen after fchdir above because the cwd file descriptor might be
+    // equal to prog_fileno and be clobbered by this operation.
+    if (options.prog_pipe != -1) {
+        if (options.prog_pipe == prog_fileno)
+            try setFdFlags(sync, options.prog_pipe, 0)
+        else
+            try dup2(sync, options.prog_pipe, prog_fileno);
     }
-
-    for (options.spawn.inherit_dirs) |dir| try setFdFlags(sync, dir.handle, 0);
-    for (options.spawn.inherit_files) |file| try setFdFlags(sync, file.handle, 0);
-
-    // Must happen after fchdir above, the cwd file descriptor might be
-    // equal to prog_fileno and be clobbered by this dup2 call.
-    if (options.prog_pipe != -1) try dup2(sync, options.prog_pipe, prog_fileno);
 
     if (options.spawn.gid) |gid| {
         switch (linux.errno(linux.setregid(gid, gid))) {
@@ -4580,7 +4586,7 @@ fn setUpChild(sync: *CancelRegion.Sync, options: struct {
     }
 
     if (options.spawn.start_suspended) {
-        switch (linux.errno(linux.kill(0, .STOP))) {
+        switch (linux.errno(linux.kill(linux.getpid(), .STOP))) {
             .SUCCESS => {},
             .PERM => return error.PermissionDenied,
             else => return error.Unexpected,
