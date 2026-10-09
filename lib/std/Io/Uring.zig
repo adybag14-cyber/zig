@@ -1229,7 +1229,8 @@ fn idle(ev: *Evented, thread: *Thread) void {
                             batch_userdata[0] = next;
                         }
                         break :ready_fiber switch (@as(u2, @truncate(next))) {
-                            0b00, 0b01 => @ptrFromInt(next & ~@as(usize, 0b11)),
+                            0b00 => @ptrFromInt(next),
+                            0b01 => null, // the timeout completion already woke this fiber
                             0b10, 0b11 => null,
                         };
                     },
@@ -2406,6 +2407,10 @@ fn batchDrainSubmitted(
                 return error.ConcurrencyUnavailable
             else
                 .{ .device_io_control = try ev.deviceIoControl(try maybe_sync.enterSync(ev), o) },
+            .net_accept => |o| {
+                _ = o;
+                @panic("TODO implement batchDrainSubmitted for net_receive");
+            },
             .net_receive => |o| {
                 _ = o;
                 @panic("TODO implement batchDrainSubmitted for net_receive");
@@ -2484,7 +2489,10 @@ fn batchDrainReady(batch: *Io.Batch) Io.Timeout.Error!void {
             if (@as(?Io.Operation.Result, result: switch (pending.tag) {
                 .file_read_streaming => .{
                     .file_read_streaming = switch (completion.errno()) {
-                        .SUCCESS => @as(u32, @bitCast(completion.result)),
+                        .SUCCESS => if (completion.result == 0)
+                            error.EndOfStream
+                        else
+                            @as(u32, @bitCast(completion.result)),
                         .INTR => 0,
                         .CANCELED => break :result null,
                         .INVAL => |err| errnoBug(err),
@@ -2522,6 +2530,7 @@ fn batchDrainReady(batch: *Io.Batch) Io.Timeout.Error!void {
                     },
                 },
                 .device_io_control => unreachable,
+                .net_accept => @panic("TODO"),
                 .net_receive => @panic("TODO"),
                 .net_send => @panic("TODO"),
                 .net_read => @panic("TODO"),
