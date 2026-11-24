@@ -406,6 +406,81 @@ test BitString {
     try std.testing.expectEqualDeep(bs, try der.decode(BitString, buf));
 }
 
+/// A nonnegative INTEGER of any size, such as an RSA modulus or an ECDSA signature component.
+pub const Unsigned = struct {
+    bytes: []const u8,
+
+    pub const asn1_tag = Tag.universal(.integer, false);
+
+    pub fn decodeDer(decoder: *der.Decoder) !Unsigned {
+        const ele = try decoder.element(asn1_tag.toExpected());
+        const bytes = decoder.view(ele);
+        if (bytes.len == 0) return error.NonCanonical;
+        if (bytes.len >= 2) {
+            if (bytes[0] == 0x00 and bytes[1] & 0x80 == 0) return error.NonCanonical;
+            if (bytes[0] == 0xff and bytes[1] & 0x80 != 0) return error.NonCanonical;
+        }
+        // Negative values are out of range, like for unsigned Zig integers.
+        if (bytes[0] & 0x80 != 0) return error.LargeValue;
+        return .{ .bytes = if (bytes.len >= 2 and bytes[0] == 0) bytes[1..] else bytes };
+    }
+
+    pub fn encodeDer(self: Unsigned, encoder: *der.Encoder) !void {
+        const start = encoder.buffer.data.len;
+        const trimmed = std.mem.trimStart(u8, self.bytes, &.{0});
+        try encoder.prependBytes(if (trimmed.len == 0) &.{0} else trimmed);
+        if (trimmed.len > 0 and trimmed[0] & 0x80 != 0) try encoder.prependBytes(&.{0});
+        try encoder.length(encoder.buffer.data.len - start);
+        try encoder.tag(asn1_tag);
+    }
+
+    /// Writes the value to `out` as a big-endian number padded with leading zeros.
+    pub fn copyPadded(self: Unsigned, out: []u8) error{LargeValue}!void {
+        const trimmed = std.mem.trimStart(u8, self.bytes, &.{0});
+        if (trimmed.len > out.len) return error.LargeValue;
+        @memset(out[0 .. out.len - trimmed.len], 0);
+        @memcpy(out[out.len - trimmed.len ..], trimmed);
+    }
+};
+
+test Unsigned {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { value: []const u8, encoded: []const u8 }{
+        .{ .value = &.{}, .encoded = &.{ 0x02, 0x01, 0x00 } },
+        .{ .value = &.{ 0x00, 0x00 }, .encoded = &.{ 0x02, 0x01, 0x00 } },
+        .{ .value = &.{ 0x00, 0x7f }, .encoded = &.{ 0x02, 0x01, 0x7f } },
+        .{ .value = &.{0x80}, .encoded = &.{ 0x02, 0x02, 0x00, 0x80 } },
+        .{ .value = &.{ 0x00, 0x01, 0x00 }, .encoded = &.{ 0x02, 0x02, 0x01, 0x00 } },
+    };
+    for (cases) |c| {
+        const buf = try der.encode(allocator, Unsigned{ .bytes = c.value });
+        defer allocator.free(buf);
+        try std.testing.expectEqualSlices(u8, c.encoded, buf);
+        const decoded = try der.decode(Unsigned, buf);
+        try std.testing.expectEqualSlices(u8, std.mem.trimStart(u8, c.value, &.{0}), std.mem.trimStart(u8, decoded.bytes, &.{0}));
+    }
+
+    const big = [_]u8{ 0x02, 0x81, 0x81, 0x00 } ++ @as([128]u8, @splat(0xff));
+    try std.testing.expectEqual(128, (try der.decode(Unsigned, &big)).bytes.len);
+    const buf = try der.encode(allocator, Unsigned{ .bytes = big[4..] });
+    defer allocator.free(buf);
+    try std.testing.expectEqualSlices(u8, &big, buf);
+
+    try std.testing.expectError(error.NonCanonical, der.decode(Unsigned, &.{ 0x02, 0x00 }));
+    try std.testing.expectError(error.NonCanonical, der.decode(Unsigned, &.{ 0x02, 0x02, 0x00, 0x7f }));
+    try std.testing.expectError(error.NonCanonical, der.decode(Unsigned, &.{ 0x02, 0x02, 0xff, 0x80 }));
+    try std.testing.expectError(error.LargeValue, der.decode(Unsigned, &.{ 0x02, 0x01, 0x80 }));
+    try std.testing.expectError(error.LargeValue, der.decode(Unsigned, &.{ 0x02, 0x02, 0xff, 0x7f }));
+    try std.testing.expectError(error.UnexpectedElement, der.decode(Unsigned, &.{ 0x0a, 0x01, 0x01 }));
+
+    var out: [3]u8 = undefined;
+    try (Unsigned{ .bytes = &.{ 0x00, 0x01, 0x02 } }).copyPadded(&out);
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x01, 0x02 }, &out);
+    try (Unsigned{ .bytes = &.{ 0x00, 0x00, 0x00, 0x00, 0x05 } }).copyPadded(&out);
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x00, 0x05 }, &out);
+    try std.testing.expectError(error.LargeValue, (Unsigned{ .bytes = &.{ 1, 2, 3, 4 } }).copyPadded(&out));
+}
+
 pub fn Opaque(comptime tag: Tag) type {
     return struct {
         bytes: []const u8,
