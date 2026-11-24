@@ -91,6 +91,13 @@ test "malformed OID" {
 
     var truncated: der.Decoder = .{ .bytes = &.{ 0x06, 0x02, 0x2a, 0x80 } };
     try std.testing.expectError(error.InvalidEncoding, decodeDer(&truncated));
+
+    for ([_][]const u8{ &.{ 0x06, 0x02, 0x80, 0x2a }, &.{ 0x06, 0x03, 0x2a, 0x80, 0x01 } }) |padded| {
+        var d: der.Decoder = .{ .bytes = padded };
+        try std.testing.expectError(error.InvalidEncoding, decodeDer(&d));
+    }
+    var zero_arc: der.Decoder = .{ .bytes = &.{ 0x06, 0x03, 0x2a, 0x81, 0x00 } };
+    try std.testing.expectEqualSlices(u8, &.{ 0x2a, 0x81, 0x00 }, (try decodeDer(&zero_arc)).encoded);
 }
 
 const TestCase = struct {
@@ -120,6 +127,10 @@ pub fn decodeDer(decoder: *der.Decoder) !Oid {
     const encoded = decoder.view(ele);
     if (encoded.len == 0) return error.EndOfStream;
     if (encoded[encoded.len - 1] & 0x80 != 0) return error.InvalidEncoding;
+    // A subidentifier starting with 0x80 has a leading zero, which DER forbids.
+    for (encoded, 0..) |b, i| {
+        if (b == 0x80 and (i == 0 or encoded[i - 1] & 0x80 == 0)) return error.InvalidEncoding;
+    }
     return Oid{ .encoded = encoded };
 }
 
