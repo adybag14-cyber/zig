@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const crypto = std.crypto;
+const asn1 = crypto.codecs.asn1;
 const fmt = std.fmt;
 const mem = std.mem;
 const sha3 = crypto.hash.sha3;
@@ -137,59 +138,22 @@ pub fn Ecdsa(comptime C: type, comptime H: type) type {
             /// The maximum length of the DER encoding is der_encoded_length_max.
             /// The function returns a slice, that can be shorter than der_encoded_length_max.
             pub fn toDer(sig: Signature, buf: *[der_encoded_length_max]u8) []u8 {
-                var w: std.Io.Writer = .fixed(buf);
-                const trimmed_r = mem.trimStart(u8, &sig.r, &.{0});
-                const trimmed_s = mem.trimStart(u8, &sig.s, &.{0});
-                const sig_r: []const u8 = if (trimmed_r.len == 0) &.{0} else trimmed_r;
-                const sig_s: []const u8 = if (trimmed_s.len == 0) &.{0} else trimmed_s;
-                const r_len = @as(u8, @intCast(sig_r.len + (sig_r[0] >> 7)));
-                const s_len = @as(u8, @intCast(sig_s.len + (sig_s[0] >> 7)));
-                const seq_len = @as(u8, @intCast(2 + r_len + 2 + s_len));
-                w.writeAll(&[_]u8{ 0x30, seq_len }) catch unreachable;
-                w.writeAll(&[_]u8{ 0x02, r_len }) catch unreachable;
-                if (sig_r[0] >> 7 != 0) {
-                    w.writeByte(0x00) catch unreachable;
-                }
-                w.writeAll(sig_r) catch unreachable;
-                w.writeAll(&[_]u8{ 0x02, s_len }) catch unreachable;
-                if (sig_s[0] >> 7 != 0) {
-                    w.writeByte(0x00) catch unreachable;
-                }
-                w.writeAll(sig_s) catch unreachable;
-                return w.buffered();
+                var e: asn1.der.Encoder = .initBuffer(buf);
+                e.any(DerSignature{ .r = .{ .bytes = &sig.r }, .s = .{ .bytes = &sig.s } }) catch unreachable;
+                const len = e.buffer.data.len;
+                @memmove(buf[0..len], e.buffer.data);
+                return buf[0..len];
             }
 
-            // Read a DER-encoded integer.
-            fn readDerInt(out: []u8, reader: *std.Io.Reader) EncodingError!void {
-                const buf = reader.takeArray(2) catch return error.InvalidEncoding;
-                if (buf[0] != 0x02) return error.InvalidEncoding;
-                var expected_len: usize = buf[1];
-                if (expected_len == 0 or expected_len > 1 + out.len) return error.InvalidEncoding;
-                var has_top_bit = false;
-                if (expected_len == 1 + out.len) {
-                    if ((reader.takeByte() catch return error.InvalidEncoding) != 0) return error.InvalidEncoding;
-                    expected_len -= 1;
-                    has_top_bit = true;
-                }
-                const out_slice = out[out.len - expected_len ..];
-                reader.readSliceAll(out_slice) catch return error.InvalidEncoding;
-                if (@intFromBool(has_top_bit) != out_slice[0] >> 7) return error.InvalidEncoding;
-                if (expected_len > 1 and out_slice[0] == 0 and out_slice[1] >> 7 == 0) return error.InvalidEncoding;
-            }
+            const DerSignature = struct { r: asn1.Unsigned, s: asn1.Unsigned };
 
             /// Create a signature from a DER representation.
             /// Returns InvalidEncoding if the DER encoding is invalid.
             pub fn fromDer(der: []const u8) EncodingError!Signature {
-                var sig: Signature = mem.zeroInit(Signature, .{});
-                var reader: std.Io.Reader = .fixed(der);
-                const buf = reader.takeArray(2) catch return error.InvalidEncoding;
-                if (buf[0] != 0x30 or @as(usize, buf[1]) + 2 != der.len) {
-                    return error.InvalidEncoding;
-                }
-                try readDerInt(&sig.r, &reader);
-                try readDerInt(&sig.s, &reader);
-                if (reader.seek != der.len) return error.InvalidEncoding;
-
+                const d = asn1.der.decode(DerSignature, der) catch return error.InvalidEncoding;
+                var sig: Signature = undefined;
+                d.r.copyPadded(&sig.r) catch return error.InvalidEncoding;
+                d.s.copyPadded(&sig.s) catch return error.InvalidEncoding;
                 return sig;
             }
         };
